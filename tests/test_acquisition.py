@@ -29,15 +29,12 @@ from automated_image_capture.models import (
     ConveyorMove,
     ConveyorStatus,
     LightStatus,
-    RobotStatus,
 )
 
 
-def test_variation_order_exhausts_lights_before_next_pose(tmp_path: Path) -> None:
+def test_fixed_view_exhausts_light_grid_once(tmp_path: Path) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=155,
-        pose_end=160,
         light_1_start=0,
         light_1_end=20,
         light_1_step=10,
@@ -50,15 +47,12 @@ def test_variation_order_exhausts_lights_before_next_pose(tmp_path: Path) -> Non
 
     first_pose = [(point.light_1_brightness, point.light_2_brightness) for point in points[:6]]
     assert first_pose == [(0, 0), (10, 0), (20, 0), (0, 10), (10, 10), (20, 10)]
-    assert [point.pose for point in points[:6]] == [155] * 6
-    assert [point.pose for point in points[6:]] == [160] * 6
+    assert len(points) == 6
 
 
 def test_each_exposure_runs_all_light_variations(tmp_path: Path) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=180,
-        pose_end=180,
         light_1_start=10,
         light_1_end=20,
         light_1_step=10,
@@ -76,13 +70,9 @@ def test_each_exposure_runs_all_light_variations(tmp_path: Path) -> None:
     assert [point.light_1_brightness for point in points] == [10, 20, 10, 20]
 
 
-def test_continuous_angle_conveyor_order_is_robot_belt_exposure_light(tmp_path: Path) -> None:
+def test_fixed_view_conveyor_order_is_belt_exposure_light(tmp_path: Path) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        robot_control_mode="angle",
-        angle_start_deg=15.5,
-        angle_end_deg=16.0,
-        angle_step_deg=0.5,
         conveyor_enabled=True,
         conveyor_max_offset_mm=20.0,
         conveyor_step_mm=10.0,
@@ -97,38 +87,28 @@ def test_continuous_angle_conveyor_order_is_robot_belt_exposure_light(tmp_path: 
     first_light_per_station = points[::2]
 
     station_targets = [
-        (point.angle_tenths, point.conveyor_offset_mm, point.conveyor_direction)
-        for point in first_light_per_station
+        (point.conveyor_offset_mm, point.conveyor_direction) for point in first_light_per_station
     ]
     assert station_targets == [
-        (155, 0.0, "out"),
-        (155, 10.0, "out"),
-        (155, 20.0, "out"),
-        (155, 10.0, "back"),
-        (155, 0.0, "back"),
-        (160, 0.0, "out"),
-        (160, 10.0, "out"),
-        (160, 20.0, "out"),
-        (160, 10.0, "back"),
-        (160, 0.0, "back"),
+        (0.0, "out"),
+        (10.0, "out"),
+        (20.0, "out"),
+        (10.0, "back"),
+        (0.0, "back"),
     ]
     assert all(
-        points[index].robot_key == points[index + 1].robot_key
-        and points[index].conveyor_key == points[index + 1].conveyor_key
+        points[index].conveyor_key == points[index + 1].conveyor_key
         for index in range(0, len(points), 2)
     )
 
 
-def test_continuous_capture_filename_contains_angle_and_belt_station(tmp_path: Path) -> None:
+def test_fixed_capture_filename_contains_belt_station(tmp_path: Path) -> None:
     writer = DatasetWriter()
     writer.start_session(tmp_path)
     point = CapturePoint(
-        155,
         10,
         20,
         None,
-        robot_control_mode="angle",
-        angle_tenths=155,
         conveyor_station_id=3,
         conveyor_offset_mm=30.0,
         conveyor_direction="out",
@@ -137,7 +117,7 @@ def test_continuous_capture_filename_contains_angle_and_belt_station(tmp_path: P
     image, metadata = writer.expected_paths(0, point)
     writer.close()
 
-    assert image.name == "img_000001_ura-0155_belt-003_pos-0300_out_p1-010_p2-020_auto.png"
+    assert image.name == "img_000001_fixed_belt-003_pos-0300_out_p1-010_p2-020_auto.png"
     assert metadata.stem == image.stem
 
 
@@ -145,8 +125,6 @@ def test_synchronized_ramp_spans_one_continuous_round_trip(tmp_path: Path) -> No
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         capture_mode="ramp",
-        pose_start=155,
-        pose_end=155,
         conveyor_enabled=True,
         conveyor_motion_mode="synchronized",
         conveyor_max_offset_mm=50.0,
@@ -157,15 +135,16 @@ def test_synchronized_ramp_spans_one_continuous_round_trip(tmp_path: Path) -> No
     duration, speed, samples = synchronized_sweep_profile(settings)
     points = build_capture_points(settings)
 
-    assert (duration, speed, samples) == (10.0, 10.0, 60)
-    assert len(points) == 60
-    assert [point.conveyor_station_id for point in points] == list(range(60))
-    assert [point.conveyor_direction for point in points[:30]] == ["out"] * 30
-    assert [point.conveyor_direction for point in points[30:]] == ["back"] * 30
-    assert points[0].conveyor_offset_mm == pytest.approx(5 / 6)
-    assert points[29].conveyor_offset_mm == pytest.approx(49 + 1 / 6)
-    assert points[30].conveyor_offset_mm == pytest.approx(49 + 1 / 6)
-    assert points[-1].conveyor_offset_mm == pytest.approx(5 / 6)
+    assert duration == pytest.approx(14.88923985)
+    assert (speed, samples) == (10.0, 90)
+    assert len(points) == 90
+    assert [point.conveyor_station_id for point in points] == list(range(90))
+    assert [point.conveyor_direction for point in points[:45]] == ["out"] * 45
+    assert [point.conveyor_direction for point in points[45:]] == ["back"] * 45
+    assert points[0].conveyor_offset_mm == pytest.approx(0.01399454)
+    assert points[44].conveyor_offset_mm == pytest.approx(49.98600546)
+    assert points[45].conveyor_offset_mm == pytest.approx(49.98600546)
+    assert points[-1].conveyor_offset_mm == pytest.approx(0.01399454)
     assert all(point.conveyor_motion_mode == "synchronized" for point in points)
 
 
@@ -174,8 +153,6 @@ def test_synchronized_grid_holds_each_light_pair_while_camera_keeps_sampling(
 ) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=155,
-        pose_end=155,
         light_1_start=0,
         light_1_end=10,
         light_1_step=10,
@@ -193,10 +170,11 @@ def test_synchronized_grid_holds_each_light_pair_while_camera_keeps_sampling(
     points = build_capture_points(settings)
     pairs = [(point.light_1_brightness, point.light_2_brightness) for point in points]
 
-    assert (duration, speed, samples) == (10.0, 10.0, 60)
-    assert len(points) == 60
+    assert duration == pytest.approx(14.88923985)
+    assert (speed, samples) == (10.0, 90)
+    assert len(points) == 90
     assert set(pairs) == {(0, 0), (10, 0), (0, 10), (10, 10)}
-    assert pairs == sorted(pairs, key=lambda pair: ((pair[1] // 10) * 2 + pair[0] // 10))
+    assert pairs == sorted(pairs, key=lambda pair: (pair[1] // 10) * 2 + pair[0] // 10)
 
 
 def test_synchronized_grid_slows_belt_for_more_light_targets_than_time_slots(
@@ -216,20 +194,16 @@ def test_synchronized_grid_slows_belt_for_more_light_targets_than_time_slots(
     duration, speed, samples = synchronized_sweep_profile(settings)
 
     assert duration == pytest.approx(121 / 6)
-    assert speed == pytest.approx(600 / 121)
-    assert samples == 121
+    assert speed == pytest.approx(5.76421990)
+    assert samples == 122
 
 
-def test_synchronized_order_is_angle_then_exposure_then_complete_sweep(
+def test_synchronized_order_is_exposure_then_complete_sweep(
     tmp_path: Path,
 ) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         capture_mode="ramp",
-        robot_control_mode="angle",
-        angle_start_deg=15.5,
-        angle_end_deg=16.0,
-        angle_step_deg=0.5,
         exposure_enabled=True,
         exposure_start_us=1000,
         exposure_end_us=2000,
@@ -243,18 +217,15 @@ def test_synchronized_order_is_angle_then_exposure_then_complete_sweep(
 
     points = build_capture_points(settings)
 
-    assert [
-        (point.angle_tenths, point.exposure_time_us, point.conveyor_direction)
-        for point in points
-    ] == [
-        (155, 1000, "out"),
-        (155, 1000, "back"),
-        (155, 2000, "out"),
-        (155, 2000, "back"),
-        (160, 1000, "out"),
-        (160, 1000, "back"),
-        (160, 2000, "out"),
-        (160, 2000, "back"),
+    assert [(point.exposure_time_us, point.conveyor_direction) for point in points] == [
+        (1000, "out"),
+        (1000, "out"),
+        (1000, "back"),
+        (1000, "back"),
+        (2000, "out"),
+        (2000, "out"),
+        (2000, "back"),
+        (2000, "back"),
     ]
 
 
@@ -272,8 +243,6 @@ def test_default_ramp_has_60_unique_samples_and_triangle_extremes(tmp_path: Path
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         capture_mode="ramp",
-        pose_start=155,
-        pose_end=155,
     )
 
     points = build_capture_points(settings)
@@ -297,12 +266,10 @@ def test_ramp_ble_timeout_allows_normal_one_second_rgb660_latency() -> None:
     assert not ramp_command_timed_out(SimpleNamespace(command_busy=False, command_age_seconds=99.0))
 
 
-def test_ramp_order_is_pose_then_exposure_then_sample(tmp_path: Path) -> None:
+def test_ramp_order_is_exposure_then_sample(tmp_path: Path) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         capture_mode="ramp",
-        pose_start=155,
-        pose_end=160,
         ramp_duration_s=2,
         ramp_image_rate_fps=1,
         exposure_enabled=True,
@@ -312,22 +279,18 @@ def test_ramp_order_is_pose_then_exposure_then_sample(tmp_path: Path) -> None:
     )
     points = build_capture_points(settings)
 
-    assert [(p.pose, p.exposure_time_us, p.ramp_sample_id) for p in points] == [
-        (155, 1000, 0),
-        (155, 1000, 1),
-        (155, 2000, 0),
-        (155, 2000, 1),
-        (160, 1000, 0),
-        (160, 1000, 1),
-        (160, 2000, 0),
-        (160, 2000, 1),
+    assert [(p.exposure_time_us, p.ramp_sample_id) for p in points] == [
+        (1000, 0),
+        (1000, 1),
+        (2000, 0),
+        (2000, 1),
     ]
 
 
 def test_ramp_writer_uses_unique_name_and_lossless_grayscale_png(tmp_path: Path) -> None:
     writer = DatasetWriter()
     session = writer.start_session(tmp_path)
-    point = CapturePoint(155, 0, 0, None, ramp_sample_id=0, planned_offset_s=0.0)
+    point = CapturePoint(0, 0, None, ramp_sample_id=0, planned_offset_s=0.0)
     rgb_gray = np.repeat(np.arange(80, dtype=np.uint8).reshape(8, 10, 1), 3, axis=2)
     frame = CameraFrame(rgb_gray, "Mono8", time.time())
 
@@ -336,13 +299,13 @@ def test_ramp_writer_uses_unique_name_and_lossless_grayscale_png(tmp_path: Path)
     writer.close()
 
     images = list(session.glob("*.png"))
-    assert images[0].name == "img_000001_ur155_ramp-000_p1-000_p2-000_auto.png"
+    assert images[0].name == "img_000001_fixed_ramp-000_p1-000_p2-000_auto.png"
     decoded = cv2.imread(str(images[0]), cv2.IMREAD_UNCHANGED)
     assert decoded.ndim == 2
     assert np.array_equal(decoded, rgb_gray[..., 0])
 
 
-def test_old_checkpoint_settings_receive_ramp_defaults(tmp_path: Path) -> None:
+def test_old_robot_checkpoint_is_rejected(tmp_path: Path) -> None:
     # Slotted dataclasses have no __dict__; this mirrors the original schema explicitly.
     old = {
         "output_directory": str(tmp_path),
@@ -359,37 +322,23 @@ def test_old_checkpoint_settings_receive_ramp_defaults(tmp_path: Path) -> None:
         "exposure_end_us": 5000,
         "exposure_step_us": 1000,
         "light_settle_ms": 350,
-        "robot_settle_ms": 500,
         "camera_settle_ms": 150,
     }
 
-    restored = AcquisitionController._settings_from_manifest(old)
-
-    assert restored.capture_mode == "grid"
-    assert restored.ramp_duration_s == 10.0
+    with pytest.raises(ValueError, match="Alte UR-Aufnahmesitzungen"):
+        AcquisitionController._settings_from_manifest(old)
 
 
-def test_new_named_poses_follow_configured_order(tmp_path: Path) -> None:
+def test_fixed_view_has_no_repeated_orientation_passes(tmp_path: Path) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=1155,
-        pose_end=2200,
         light_1_start=0,
         light_1_end=0,
         light_2_start=0,
         light_2_end=0,
     )
 
-    assert [point.pose for point in build_capture_points(settings)] == [
-        1155,
-        1170,
-        1185,
-        1200,
-        2155,
-        2170,
-        2185,
-        2200,
-    ]
+    assert len(build_capture_points(settings)) == 1
 
 
 def test_yaml_serializer_handles_nested_metadata() -> None:
@@ -418,9 +367,7 @@ class FakeCamera(QObject):
         self.config = SimpleNamespace(preview_max_fps=15)
         self.capture_stream_enabled = False
 
-    def set_capture_stream_enabled(
-        self, enabled: bool, target_fps: float | None = None
-    ) -> None:
+    def set_capture_stream_enabled(self, enabled: bool, target_fps: float | None = None) -> None:
         self.capture_stream_enabled = enabled
 
     def set_exposure_time(self, value: float) -> bool:
@@ -428,18 +375,6 @@ class FakeCamera(QObject):
         return True
 
     def restore_exposure(self) -> bool:
-        return True
-
-
-class FakeRobot(QObject):
-    status_changed = pyqtSignal(object)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.requests: list[int] = []
-
-    def request_pose(self, pose: int) -> bool:
-        self.requests.append(pose)
         return True
 
 
@@ -482,6 +417,9 @@ class FakeConveyor(QObject):
         self.origin_position = 0
         self.status = ConveyorStatus(
             connected=True,
+            velocity_only=True,
+            capture_interface_version=1,
+            motor_count=2,
             calibration_valid=True,
             mm_per_full_step=1.0,
             ready_to_execute=True,
@@ -494,7 +432,7 @@ class FakeConveyor(QObject):
         self.requests: list[tuple[int, float, float]] = []
         self._sequence = 100
 
-    def request_offset(self, offset: float, speed: float) -> int:
+    def request_offset(self, offset: float, speed: float, acceleration: float | None = None) -> int:
         self._sequence += 1
         sequence = self._sequence
         self.requests.append((sequence, offset, speed))
@@ -551,67 +489,21 @@ class FakeConveyor(QObject):
 def _ready_controller() -> tuple[
     AcquisitionController,
     FakeCamera,
-    FakeRobot,
     FakeLight,
     FakeLight,
 ]:
     camera = FakeCamera()
-    robot = FakeRobot()
     light_1 = FakeLight("PANEL-1")
     light_2 = FakeLight("PANEL-2")
-    controller = AcquisitionController(camera, robot, light_1, light_2)
+    controller = AcquisitionController(camera, light_1, light_2)
     camera.status_changed.emit(CameraStatus(model="TestCam"))
-    robot.status_changed.emit(_robot_status(command_state_code=1))
     light_1.status_changed.emit(light_1.status)
     light_2.status_changed.emit(light_2.status)
-    return controller, camera, robot, light_1, light_2
-
-
-def _robot_status(
-    *,
-    command_state_code: int,
-    sequence: int | None = None,
-    acknowledged_pose: int | None = None,
-) -> RobotStatus:
-    return RobotStatus(
-        rtde_connected=True,
-        command_channel_connected=True,
-        robot_mode="RUNNING",
-        safety_mode="NORMAL",
-        program_state="PLAYING",
-        loaded_program="/programs/BiBaZu_GUI.urp",
-        command_state_code=command_state_code,
-        requested_sequence=sequence,
-        acknowledged_sequence=sequence,
-        acknowledged_pose=acknowledged_pose,
-        command_pending=False,
-    )
-
-
-def test_preflight_explains_wrong_robot_program(tmp_path: Path) -> None:
-    controller, _camera, _robot, _light_1, _light_2 = _ready_controller()
-    settings = AcquisitionSettings(
-        output_directory=tmp_path,
-        robot_control_mode="angle",
-        angle_start_deg=15.5,
-        angle_end_deg=15.5,
-        light_1_start=0,
-        light_1_end=0,
-        light_2_start=0,
-        light_2_end=0,
-    )
-
-    checks = controller.preflight_checks(settings)
-    program = next(check for check in checks if check.key == "robot_program")
-
-    assert not program.ready
-    assert "BIBAZU_CONTINUOUS" in program.detail
-    assert "BiBaZu_GUI.urp" in program.detail
-    controller.close()
+    return controller, camera, light_1, light_2
 
 
 def test_preflight_accepts_conveyor_standby_before_drive_enable(tmp_path: Path) -> None:
-    controller, _camera, _robot, _light_1, _light_2 = _ready_controller()
+    controller, _camera, _light_1, _light_2 = _ready_controller()
     controller.conveyor = SimpleNamespace(
         state=ConnectionState.CONNECTED,
         status=ConveyorStatus(
@@ -631,8 +523,6 @@ def test_preflight_accepts_conveyor_standby_before_drive_enable(tmp_path: Path) 
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         conveyor_enabled=True,
-        pose_start=155,
-        pose_end=155,
         light_1_start=0,
         light_1_end=0,
         light_2_start=0,
@@ -640,8 +530,7 @@ def test_preflight_accepts_conveyor_standby_before_drive_enable(tmp_path: Path) 
     )
 
     drive = next(
-        check for check in controller.preflight_checks(settings)
-        if check.key == "conveyor_drive"
+        check for check in controller.preflight_checks(settings) if check.key == "conveyor_drive"
     )
 
     assert drive.ready
@@ -650,7 +539,7 @@ def test_preflight_accepts_conveyor_standby_before_drive_enable(tmp_path: Path) 
 
 
 def test_synchronized_preflight_requires_position_feedback_test(tmp_path: Path) -> None:
-    controller, _camera, _robot, _light_1, _light_2 = _ready_controller()
+    controller, _camera, _light_1, _light_2 = _ready_controller()
     controller.conveyor = SimpleNamespace(
         state=ConnectionState.CONNECTED,
         status=ConveyorStatus(
@@ -667,8 +556,6 @@ def test_synchronized_preflight_requires_position_feedback_test(tmp_path: Path) 
         output_directory=tmp_path,
         conveyor_enabled=True,
         conveyor_motion_mode="synchronized",
-        pose_start=155,
-        pose_end=155,
         light_1_start=0,
         light_1_end=0,
         light_2_start=0,
@@ -689,7 +576,7 @@ def test_synchronized_preflight_requires_position_feedback_test(tmp_path: Path) 
 def test_new_synchronized_session_requires_belt_at_zero_but_resume_does_not(
     tmp_path: Path,
 ) -> None:
-    controller, _camera, _robot, _light_1, _light_2 = _ready_controller()
+    controller, _camera, _light_1, _light_2 = _ready_controller()
     controller.conveyor = SimpleNamespace(
         state=ConnectionState.CONNECTED,
         status=ConveyorStatus(
@@ -707,8 +594,6 @@ def test_new_synchronized_session_requires_belt_at_zero_but_resume_does_not(
         output_directory=tmp_path,
         conveyor_enabled=True,
         conveyor_motion_mode="synchronized",
-        pose_start=155,
-        pose_end=155,
         light_1_start=0,
         light_1_end=0,
         light_2_start=0,
@@ -735,49 +620,23 @@ def test_new_synchronized_session_requires_belt_at_zero_but_resume_does_not(
 
 def test_single_point_sequence_saves_png_and_yaml(qtbot, tmp_path: Path) -> None:
     camera = FakeCamera()
-    robot = FakeRobot()
     light_1 = FakeLight("PANEL-1")
     light_2 = FakeLight("PANEL-2")
-    controller = AcquisitionController(camera, robot, light_1, light_2)
+    controller = AcquisitionController(camera, light_1, light_2)
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=180,
-        pose_end=180,
         light_1_start=20,
         light_1_end=20,
         light_2_start=30,
         light_2_end=30,
         light_settle_ms=0,
-        robot_settle_ms=0,
     )
     camera.status_changed.emit(CameraStatus(model="TestCam"))
-    robot.status_changed.emit(
-        RobotStatus(
-            rtde_connected=True,
-            command_channel_connected=True,
-            robot_mode="RUNNING",
-            safety_mode="NORMAL",
-            program_state="PLAYING",
-            loaded_program="/programs/BiBaZu_GUI.urp",
-            command_state_code=1,
-        )
-    )
     light_1.status_changed.emit(light_1.status)
     light_2.status_changed.emit(light_2.status)
 
     assert controller.start(settings)
     assert camera.capture_stream_enabled
-    qtbot.waitUntil(lambda: robot.requests == [180], timeout=2000)
-    robot.status_changed.emit(
-        RobotStatus(
-            # Register 41 is redundant and may remain zero on some UR programs.
-            acknowledged_pose=None,
-            acknowledged_sequence=7,
-            requested_sequence=7,
-            command_state_code=3,
-            command_pending=False,
-        )
-    )
     qtbot.waitUntil(
         lambda: light_1.status.brightness == 20 and light_2.status.brightness == 30,
         timeout=2000,
@@ -799,29 +658,22 @@ def test_single_point_sequence_saves_png_and_yaml(qtbot, tmp_path: Path) -> None
     assert len(metadata) == 1
     assert images[0].stem == metadata[0].stem
     yaml_text = metadata[0].read_text(encoding="utf-8")
-    assert "requested_pose_id: 180" in yaml_text
+    assert "inclination_adjustable: false" in yaml_text
     assert "requested_brightness_percent: 20" in yaml_text
 
 
 def test_two_sample_ramp_captures_on_timeline_and_finishes_at_zero(qtbot, tmp_path: Path) -> None:
-    controller, camera, robot, light_1, light_2 = _ready_controller()
+    controller, camera, light_1, light_2 = _ready_controller()
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         capture_mode="ramp",
-        pose_start=180,
-        pose_end=180,
         ramp_duration_s=2.0,
         ramp_image_rate_fps=1,
         ramp_light_1_period_s=2.0,
         ramp_light_2_period_s=2.0,
-        robot_settle_ms=0,
     )
 
     assert controller.start(settings)
-    qtbot.waitUntil(lambda: robot.requests == [180], timeout=2000)
-    robot.status_changed.emit(
-        _robot_status(command_state_code=3, sequence=9, acknowledged_pose=180)
-    )
     qtbot.waitUntil(lambda: controller._phase == "ramp_frame", timeout=2000)
     first_origin = controller._ramp_origin_wall
     camera.capture_frame_ready.emit(
@@ -850,26 +702,21 @@ def test_two_sample_ramp_captures_on_timeline_and_finishes_at_zero(qtbot, tmp_pa
 
 def test_synchronized_sweep_moves_out_and_back_while_capturing(qtbot, tmp_path: Path) -> None:
     camera = FakeCamera()
-    robot = FakeRobot()
     light_1 = FakeLight("PANEL-1")
     light_2 = FakeLight("PANEL-2")
     conveyor = FakeConveyor()
     controller = AcquisitionController(
         camera,
-        robot,
         light_1,
         light_2,
         conveyor=conveyor,
     )
     camera.status_changed.emit(CameraStatus(model="TestCam", preview_fps=2.0))
-    robot.status_changed.emit(_robot_status(command_state_code=1))
     light_1.status_changed.emit(light_1.status)
     light_2.status_changed.emit(light_2.status)
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         capture_mode="ramp",
-        pose_start=180,
-        pose_end=180,
         conveyor_enabled=True,
         conveyor_motion_mode="synchronized",
         conveyor_max_offset_mm=2.0,
@@ -878,14 +725,9 @@ def test_synchronized_sweep_moves_out_and_back_while_capturing(qtbot, tmp_path: 
         ramp_duration_s=2.0,
         ramp_light_1_period_s=2.0,
         ramp_light_2_period_s=2.0,
-        robot_settle_ms=0,
     )
 
     assert controller.start(settings)
-    qtbot.waitUntil(lambda: robot.requests == [180], timeout=2000)
-    robot.status_changed.emit(
-        _robot_status(command_state_code=3, sequence=9, acknowledged_pose=180)
-    )
     qtbot.waitUntil(lambda: len(conveyor.requests) == 1, timeout=2000)
     assert conveyor.requests[0][1:] == pytest.approx((2.0, 2.0))
 
@@ -894,9 +736,14 @@ def test_synchronized_sweep_moves_out_and_back_while_capturing(qtbot, tmp_path: 
     first_origin = controller._sweep_origin_wall
     conveyor.status.logical_offset_mm = 1.0
     conveyor.status.sampled_at = time.time()
-    camera.capture_frame_ready.emit(
-        CameraFrame(np.full((8, 10, 3), 80, np.uint8), "Mono8", first_origin + 0.51)
-    )
+    for point in controller._points[:2]:
+        camera.capture_frame_ready.emit(
+            CameraFrame(
+                np.full((8, 10, 3), 80, np.uint8),
+                "Mono8",
+                first_origin + point.planned_offset_s + 0.01,
+            )
+        )
     qtbot.waitUntil(lambda: controller._phase == "sweep_wait_out", timeout=2000)
 
     conveyor.complete_move(2.0)
@@ -914,16 +761,21 @@ def test_synchronized_sweep_moves_out_and_back_while_capturing(qtbot, tmp_path: 
     return_origin = controller._sweep_origin_wall
     conveyor.status.logical_offset_mm = 1.0
     conveyor.status.sampled_at = time.time()
-    camera.capture_frame_ready.emit(
-        CameraFrame(np.full((8, 10, 3), 120, np.uint8), "Mono8", return_origin + 1.51)
-    )
+    for point in controller._points[2:]:
+        camera.capture_frame_ready.emit(
+            CameraFrame(
+                np.full((8, 10, 3), 120, np.uint8),
+                "Mono8",
+                return_origin + point.planned_offset_s + 0.01,
+            )
+        )
     qtbot.waitUntil(lambda: controller._phase == "sweep_wait_return", timeout=2000)
     conveyor.complete_move(0.0)
     qtbot.waitUntil(lambda: not controller.running, timeout=5000)
 
     session = controller.session_directory
     assert session is not None
-    assert len(list(session.glob("*.png"))) == 2
+    assert len(list(session.glob("*.png"))) == 4
     yaml_text = next(session.glob("*.yaml")).read_text(encoding="utf-8")
     assert 'motion_mode: "synchronized"' in yaml_text
     assert "measured_position_mm: 1.0" in yaml_text
@@ -932,7 +784,7 @@ def test_synchronized_sweep_moves_out_and_back_while_capturing(qtbot, tmp_path: 
 
 
 def test_ramp_capture_does_not_wait_for_slow_png_writer(qtbot, tmp_path: Path) -> None:
-    controller, camera, robot, _light_1, _light_2 = _ready_controller()
+    controller, camera, _light_1, _light_2 = _ready_controller()
     original_write = controller.writer._write_pair
 
     def slow_write(*args, **kwargs) -> None:
@@ -943,18 +795,11 @@ def test_ramp_capture_does_not_wait_for_slow_png_writer(qtbot, tmp_path: Path) -
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         capture_mode="ramp",
-        pose_start=180,
-        pose_end=180,
         ramp_duration_s=2.0,
         ramp_image_rate_fps=1,
-        robot_settle_ms=0,
     )
 
     assert controller.start(settings)
-    qtbot.waitUntil(lambda: robot.requests == [180], timeout=2000)
-    robot.status_changed.emit(
-        _robot_status(command_state_code=3, sequence=10, acknowledged_pose=180)
-    )
     qtbot.waitUntil(lambda: controller._phase == "ramp_frame", timeout=2000)
     origin = controller._ramp_origin_wall
     camera.capture_frame_ready.emit(
@@ -976,8 +821,6 @@ def test_ramp_checkpoint_advances_only_across_contiguous_completed_writes(
     settings = AcquisitionSettings(
         output_directory=tmp_path,
         capture_mode="ramp",
-        pose_start=180,
-        pose_end=180,
         ramp_duration_s=2.0,
         ramp_image_rate_fps=1,
     )
@@ -1002,25 +845,18 @@ def test_ramp_checkpoint_advances_only_across_contiguous_completed_writes(
 def test_interrupted_sequence_resumes_in_same_directory_without_duplicates(
     qtbot, tmp_path: Path
 ) -> None:
-    controller, camera, robot, light_1, light_2 = _ready_controller()
+    controller, camera, light_1, light_2 = _ready_controller()
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=180,
-        pose_end=180,
         light_1_start=20,
         light_1_end=30,
         light_1_step=10,
         light_2_start=40,
         light_2_end=40,
         light_settle_ms=0,
-        robot_settle_ms=0,
     )
 
     assert controller.start(settings)
-    qtbot.waitUntil(lambda: robot.requests == [180], timeout=2000)
-    robot.status_changed.emit(
-        _robot_status(command_state_code=3, sequence=7, acknowledged_pose=180)
-    )
     qtbot.waitUntil(lambda: controller._phase == "frame", timeout=2000)
     camera.capture_frame_ready.emit(
         CameraFrame(np.full((8, 10, 3), 90, dtype=np.uint8), "RGB8", time.time() + 0.01)
@@ -1044,10 +880,6 @@ def test_interrupted_sequence_resumes_in_same_directory_without_duplicates(
     assert controller.resume_available
     camera.state = ConnectionState.CONNECTED
     assert controller.resume()
-    qtbot.waitUntil(lambda: robot.requests == [180, 180], timeout=2000)
-    robot.status_changed.emit(
-        _robot_status(command_state_code=3, sequence=8, acknowledged_pose=180)
-    )
     qtbot.waitUntil(lambda: controller._phase == "frame", timeout=2000)
     camera.capture_frame_ready.emit(
         CameraFrame(np.full((8, 10, 3), 120, dtype=np.uint8), "RGB8", time.time() + 0.01)
@@ -1064,11 +896,9 @@ def test_interrupted_sequence_resumes_in_same_directory_without_duplicates(
 
 
 def test_interrupted_session_is_restored_after_controller_restart(qtbot, tmp_path: Path) -> None:
-    first, _camera, robot, _light_1, _light_2 = _ready_controller()
+    first, _camera, _light_1, _light_2 = _ready_controller()
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=180,
-        pose_end=180,
         light_1_start=20,
         light_1_end=30,
         light_1_step=10,
@@ -1076,12 +906,11 @@ def test_interrupted_session_is_restored_after_controller_restart(qtbot, tmp_pat
         light_2_end=40,
     )
     assert first.start(settings)
-    qtbot.waitUntil(lambda: robot.requests == [180], timeout=2000)
     session = first.session_directory
     first._fail("simulierter Neustart")
     first.close()
 
-    second, _camera2, _robot2, _light3, _light4 = _ready_controller()
+    second, _camera2, _light3, _light4 = _ready_controller()
     assert second.restore_interrupted(settings)
     assert second.resume_available
     assert second.remaining_count == 2
@@ -1115,8 +944,6 @@ def _create_checkpoint(
 def test_restore_reconciles_complete_file_pairs_without_recapturing(qtbot, tmp_path: Path) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=180,
-        pose_end=180,
         light_1_start=20,
         light_1_end=30,
         light_1_step=10,
@@ -1139,8 +966,6 @@ def test_restore_reconciles_complete_file_pairs_without_recapturing(qtbot, tmp_p
 def test_restore_rejects_incomplete_png_yaml_pair(qtbot, tmp_path: Path) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=180,
-        pose_end=180,
         light_1_start=20,
         light_1_end=30,
         light_1_step=10,
@@ -1170,8 +995,6 @@ def test_legacy_interrupted_folder_is_reconstructed_from_complete_prefix(
 ) -> None:
     settings = AcquisitionSettings(
         output_directory=tmp_path,
-        pose_start=180,
-        pose_end=180,
         light_1_start=20,
         light_1_end=30,
         light_1_step=10,

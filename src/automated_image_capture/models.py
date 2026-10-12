@@ -16,11 +16,6 @@ class ConnectionState(StrEnum):
     ERROR = "Fehler"
 
 
-class RobotCommandMode(StrEnum):
-    POSE_ID = "pose_id"
-    ANGLE = "angle"
-
-
 @dataclass(slots=True)
 class CameraStatus:
     model: str = "–"
@@ -47,34 +42,6 @@ class CameraFrame:
     timestamp: float
 
 
-@dataclass(slots=True)
-class RobotStatus:
-    rtde_connected: bool = False
-    dashboard_connected: bool = False
-    robot_mode: str = "–"
-    safety_mode: str = "–"
-    remote_control: str = "–"
-    program_state: str = "–"
-    loaded_program: str = "–"
-    polyscope_version: str = "–"
-    speed_scaling: float | None = None
-    joint_positions: tuple[float, ...] = field(default_factory=tuple)
-    tcp_pose: tuple[float, ...] = field(default_factory=tuple)
-    command_channel_connected: bool = False
-    command_state_code: int | None = None
-    command_state: str = "–"
-    requested_pose: int | None = None
-    requested_sequence: int | None = None
-    acknowledged_pose: int | None = None
-    acknowledged_sequence: int | None = None
-    command_pending: bool = False
-    command_mode: RobotCommandMode = RobotCommandMode.POSE_ID
-    requested_raw_value: int | None = None
-    acknowledged_raw_value: int | None = None
-    requested_angle_deg: float | None = None
-    acknowledged_angle_deg: float | None = None
-
-
 @dataclass(slots=True, frozen=True)
 class ConveyorMove:
     sequence: int
@@ -87,11 +54,17 @@ class ConveyorMove:
     plc_direction: str
     start_internal_position: int | None = None
     commanded_at: float | None = None
+    acceleration_rpm_per_s: float | None = None
 
 
 @dataclass(slots=True)
 class ConveyorStatus:
     connected: bool = False
+    velocity_only: bool = False
+    capture_interface_version: int = 0
+    motor_count: int = 0
+    servo_fault_code: int = 0
+    acceleration_rpm_per_s: float = 0.0
     calibration_valid: bool = False
     mm_per_full_step: float = 0.0
     ready_to_execute: bool = False

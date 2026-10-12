@@ -13,7 +13,6 @@ DEFAULT_CTI_PATH = r"C:\Program Files\Baumer Camera Explorer\bgapi2_gige.cti"
 @dataclass(slots=True)
 class AppSettings:
     camera_ip: str = "169.254.117.70"
-    robot_ip: str = "10.10.10.10"
     plc_ip: str = "192.168.10.23"
     plc_ams_net_id: str = "10.145.4.14.1.1"
     plc_port: int = 851
@@ -30,7 +29,6 @@ class AppSettings:
 
     def validated(self) -> AppSettings:
         ip_address(self.camera_ip)
-        ip_address(self.robot_ip)
         ip_address(self.plc_ip)
         net_id_parts = self.plc_ams_net_id.strip().split(".")
         if len(net_id_parts) != 6 or any(
@@ -48,7 +46,6 @@ class AppSettings:
         return replace(
             self,
             camera_ip=self.camera_ip.strip(),
-            robot_ip=self.robot_ip.strip(),
             plc_ip=self.plc_ip.strip(),
             plc_ams_net_id=self.plc_ams_net_id.strip(),
             camera_cti_path=str(Path(self.camera_cti_path.strip())),
@@ -66,11 +63,8 @@ class SettingsStore:
         defaults = AppSettings()
         return AppSettings(
             camera_ip=str(self._settings.value("camera/ip", defaults.camera_ip)),
-            robot_ip=str(self._settings.value("robot/ip", defaults.robot_ip)),
             plc_ip=str(self._settings.value("plc/ip", defaults.plc_ip)),
-            plc_ams_net_id=str(
-                self._settings.value("plc/ams_net_id", defaults.plc_ams_net_id)
-            ),
+            plc_ams_net_id=str(self._settings.value("plc/ams_net_id", defaults.plc_ams_net_id)),
             plc_port=int(self._settings.value("plc/port", defaults.plc_port)),
             conveyor_forward_direction=str(
                 self._settings.value(
@@ -99,13 +93,10 @@ class SettingsStore:
     def save(self, config: AppSettings) -> None:
         config = config.validated()
         self._settings.setValue("camera/ip", config.camera_ip)
-        self._settings.setValue("robot/ip", config.robot_ip)
         self._settings.setValue("plc/ip", config.plc_ip)
         self._settings.setValue("plc/ams_net_id", config.plc_ams_net_id)
         self._settings.setValue("plc/port", config.plc_port)
-        self._settings.setValue(
-            "plc/conveyor_forward_direction", config.conveyor_forward_direction
-        )
+        self._settings.setValue("plc/conveyor_forward_direction", config.conveyor_forward_direction)
         self._settings.setValue("camera/cti_path", config.camera_cti_path)
         self._settings.setValue("camera/serial", config.camera_serial)
         self._settings.setValue("light/address", config.light_address)
@@ -113,9 +104,7 @@ class SettingsStore:
         self._settings.setValue("light_2/address", config.light_2_address)
         self._settings.setValue("light_2/name", config.light_2_name)
         self._settings.setValue("camera/preview_max_fps", config.preview_max_fps)
-        self._settings.setValue(
-            "camera/maximize_frame_rate", config.maximize_camera_frame_rate
-        )
+        self._settings.setValue("camera/maximize_frame_rate", config.maximize_camera_frame_rate)
         self._settings.setValue("connections/auto_reconnect", config.auto_reconnect)
         self._settings.sync()
 
@@ -137,8 +126,6 @@ class SettingsStore:
             capture_mode=str(
                 self._settings.value("acquisition/capture_mode", defaults.capture_mode)
             ),
-            pose_start=int(self._settings.value("acquisition/pose_start", defaults.pose_start)),
-            pose_end=int(self._settings.value("acquisition/pose_end", defaults.pose_end)),
             light_1_start=int(
                 self._settings.value("acquisition/light_1_start", defaults.light_1_start)
             ),
@@ -168,9 +155,6 @@ class SettingsStore:
             light_settle_ms=int(
                 self._settings.value("acquisition/light_settle_ms", defaults.light_settle_ms)
             ),
-            robot_settle_ms=int(
-                self._settings.value("acquisition/robot_settle_ms", defaults.robot_settle_ms)
-            ),
             camera_settle_ms=int(
                 self._settings.value("acquisition/camera_settle_ms", defaults.camera_settle_ms)
             ),
@@ -192,20 +176,6 @@ class SettingsStore:
                     "acquisition/ramp_light_2_period_s", defaults.ramp_light_2_period_s
                 )
             ),
-            robot_control_mode=str(
-                self._settings.value(
-                    "acquisition/robot_control_mode", defaults.robot_control_mode
-                )
-            ),
-            angle_start_deg=float(
-                self._settings.value("acquisition/angle_start_deg", defaults.angle_start_deg)
-            ),
-            angle_end_deg=float(
-                self._settings.value("acquisition/angle_end_deg", defaults.angle_end_deg)
-            ),
-            angle_step_deg=float(
-                self._settings.value("acquisition/angle_step_deg", defaults.angle_step_deg)
-            ),
             conveyor_enabled=self._settings.value(
                 "acquisition/conveyor_enabled", defaults.conveyor_enabled, type=bool
             ),
@@ -220,9 +190,7 @@ class SettingsStore:
                 )
             ),
             conveyor_step_mm=float(
-                self._settings.value(
-                    "acquisition/conveyor_step_mm", defaults.conveyor_step_mm
-                )
+                self._settings.value("acquisition/conveyor_step_mm", defaults.conveyor_step_mm)
             ),
             conveyor_speed_mm_per_s=float(
                 self._settings.value(
@@ -230,8 +198,12 @@ class SettingsStore:
                 )
             ),
             conveyor_settle_ms=int(
+                self._settings.value("acquisition/conveyor_settle_ms", defaults.conveyor_settle_ms)
+            ),
+            conveyor_acceleration_rpm_per_s=float(
                 self._settings.value(
-                    "acquisition/conveyor_settle_ms", defaults.conveyor_settle_ms
+                    "acquisition/conveyor_acceleration_rpm_per_s",
+                    defaults.conveyor_acceleration_rpm_per_s,
                 )
             ),
         ).validated()
@@ -241,8 +213,6 @@ class SettingsStore:
         for field_name in (
             "output_directory",
             "capture_mode",
-            "pose_start",
-            "pose_end",
             "light_1_start",
             "light_1_end",
             "light_1_step",
@@ -254,22 +224,18 @@ class SettingsStore:
             "exposure_end_us",
             "exposure_step_us",
             "light_settle_ms",
-            "robot_settle_ms",
             "camera_settle_ms",
             "ramp_duration_s",
             "ramp_image_rate_fps",
             "ramp_light_1_period_s",
             "ramp_light_2_period_s",
-            "robot_control_mode",
-            "angle_start_deg",
-            "angle_end_deg",
-            "angle_step_deg",
             "conveyor_enabled",
             "conveyor_motion_mode",
             "conveyor_max_offset_mm",
             "conveyor_step_mm",
             "conveyor_speed_mm_per_s",
             "conveyor_settle_ms",
+            "conveyor_acceleration_rpm_per_s",
         ):
             value = getattr(config, field_name)
             if field_name == "output_directory":
@@ -469,12 +435,8 @@ class SettingsStore:
             max_edge=int(self._settings.value("cleanup/max_edge", 0)),
             png_compression=int(self._settings.value("cleanup/png_compression", 3)),
             quality=int(self._settings.value("cleanup/quality", 90)),
-            remove_caches=self._settings.value(
-                "cleanup/remove_caches", True, type=bool
-            ),
-            deduplicate=self._settings.value(
-                "cleanup/deduplicate", True, type=bool
-            ),
+            remove_caches=self._settings.value("cleanup/remove_caches", True, type=bool),
+            deduplicate=self._settings.value("cleanup/deduplicate", True, type=bool),
         )
 
     def save_cleanup(self, config) -> None:

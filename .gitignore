@@ -25,3 +25,5 @@ dist/
 /tmp/
 *.tmp
 *.temp
+
+/.test_tmp/

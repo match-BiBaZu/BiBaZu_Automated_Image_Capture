@@ -31,7 +31,6 @@ from automated_image_capture.hardware import (
     CameraAdapter,
     ConveyorAdapter,
     LightAdapter,
-    RobotAdapter,
 )
 from automated_image_capture.inference import (
     InferenceFrame,
@@ -44,7 +43,6 @@ from automated_image_capture.models import (
     ConnectionState,
     ConveyorStatus,
     LightStatus,
-    RobotStatus,
 )
 from automated_image_capture.settings import SettingsStore
 from automated_image_capture.ui.cleanup_dialog import CleanupDialog
@@ -56,7 +54,6 @@ from automated_image_capture.ui.widgets import (
     CameraControlCard,
     ConveyorControlCard,
     LightControlCard,
-    RobotPoseControlCard,
     SettingsDialog,
 )
 
@@ -83,7 +80,6 @@ class MainWindow(QMainWindow):
         self._closing = False
         self._training_dialog: TrainingDialog | None = None
         self.camera = CameraAdapter(self.config, self)
-        self.robot = RobotAdapter(self.config, self)
         self.conveyor = ConveyorAdapter(self.config, self)
         self.light = LightAdapter(
             self.config,
@@ -101,7 +97,6 @@ class MainWindow(QMainWindow):
         )
         self.acquisition = AcquisitionController(
             self.camera,
-            self.robot,
             self.light,
             self.light_2,
             self,
@@ -110,6 +105,9 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._wire_adapters()
+        self.statusBar().showMessage(
+            f"Kamera {self.config.camera_ip} · SPS {self.config.plc_ip} · feste Rutsche"
+        )
         if self.acquisition.restore_interrupted(self.acquisition_config):
             if self.acquisition.session_settings is not None:
                 self.acquisition_config = self.acquisition.session_settings
@@ -140,7 +138,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(training_button)
         toolbar.addWidget(cleanup_button)
         toolbar.addStretch(1)
-        safety = QLabel("UR16e: Bewegungsziele nur über den geprüften RTDE-Handshake")
+        safety = QLabel("Fest montierte Rutsche · feste Neigung · Zweimotoren-Förderband")
         safety.setStyleSheet("color:#b45309; font-weight:600;")
         toolbar.addWidget(safety)
         toolbar.addWidget(settings_button)
@@ -150,21 +148,18 @@ class MainWindow(QMainWindow):
         cards_container = QWidget()
         cards_layout = QVBoxLayout(cards_container)
         self.camera_card = CameraControlCard("Baumer Industriekamera")
-        self.robot_card = RobotPoseControlCard("Universal Robots UR16e")
         self.conveyor_card = ConveyorControlCard(
-            "TwinCAT-Förderband", self.config.conveyor_forward_direction
+            "TwinCAT-Förderband · 2 Motoren", self.config.conveyor_forward_direction
         )
         self.light_card = LightControlCard("Neewer RGB660 Pro II · Licht 1")
         self.light_2_card = LightControlCard("Neewer RGB660 Pro II · Licht 2")
         self.acquisition_card = AcquisitionCard()
         self.camera_card.action_requested.connect(lambda: self._toggle(self.camera))
-        self.robot_card.action_requested.connect(lambda: self._toggle(self.robot))
         self.conveyor_card.action_requested.connect(lambda: self._toggle(self.conveyor))
         self.light_card.action_requested.connect(lambda: self._toggle(self.light))
         self.light_2_card.action_requested.connect(lambda: self._toggle(self.light_2))
         cards_layout.addWidget(self.acquisition_card)
         cards_layout.addWidget(self.camera_card)
-        cards_layout.addWidget(self.robot_card)
         cards_layout.addWidget(self.conveyor_card)
         cards_layout.addWidget(self.light_card)
         cards_layout.addWidget(self.light_2_card)
@@ -180,7 +175,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(cards_container)
-        scroll.setMinimumWidth(430)
+        scroll.setMinimumWidth(570)
         splitter.addWidget(scroll)
 
         preview_container = QWidget()
@@ -217,12 +212,8 @@ class MainWindow(QMainWindow):
         self.inference_status.setMinimumWidth(150)
         self.inference_status.setStyleSheet("color:#64748b;")
         self.inference_toggle.toggled.connect(self._toggle_live_inference)
-        self.inference_confidence.editingFinished.connect(
-            self._apply_inference_runtime_settings
-        )
-        self.inference_max_fps.editingFinished.connect(
-            self._apply_inference_runtime_settings
-        )
+        self.inference_confidence.editingFinished.connect(self._apply_inference_runtime_settings)
+        self.inference_max_fps.editingFinished.connect(self._apply_inference_runtime_settings)
         inference_controls.addWidget(self.inference_toggle)
         inference_controls.addWidget(self.inference_model, 1)
         inference_controls.addWidget(choose_model)
@@ -238,7 +229,7 @@ class MainWindow(QMainWindow):
         self.preview.setStyleSheet("background:#111827; color:#d1d5db; border-radius:5px;")
         preview_layout.addWidget(self.preview, 1)
         splitter.addWidget(preview_container)
-        splitter.setSizes([480, 940])
+        splitter.setSizes([570, 850])
         root.addWidget(splitter, 1)
 
         log_header = QHBoxLayout()
@@ -255,12 +246,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self.event_log)
 
         self.setCentralWidget(central)
-        self.statusBar().showMessage(f"Kamera {self.config.camera_ip} · UR {self.config.robot_ip}")
+        self.statusBar().showMessage(f"Kamera {self.config.camera_ip} · SPS {self.config.plc_ip}")
 
     def _wire_adapters(self) -> None:
         for adapter, card in (
             (self.camera, self.camera_card),
-            (self.robot, self.robot_card),
             (self.conveyor, self.conveyor_card),
             (self.light, self.light_card),
             (self.light_2, self.light_2_card),
@@ -274,15 +264,11 @@ class MainWindow(QMainWindow):
         self.camera.status_changed.connect(self._camera_status)
         self.camera.frame_ready.connect(self._camera_frame)
         self.camera_card.exposure_requested.connect(self.camera.set_exposure_time)
-        self.robot.status_changed.connect(self._robot_status)
-        self.robot_card.pose_requested.connect(self.robot.request_pose)
         self.conveyor.status_changed.connect(self._conveyor_status)
         self.conveyor_card.jog_requested.connect(self._jog_conveyor)
         self.conveyor_card.stop_requested.connect(self.conveyor.stop_motion)
         self.conveyor_card.origin_requested.connect(self.conveyor.set_current_as_origin)
-        self.conveyor_card.forward_direction_changed.connect(
-            self._set_conveyor_forward_direction
-        )
+        self.conveyor_card.forward_direction_changed.connect(self._set_conveyor_forward_direction)
         self.light.status_changed.connect(self._light_status)
         self.light.state_changed.connect(self._light_state)
         self.light_2.status_changed.connect(self._light_2_status)
@@ -298,9 +284,7 @@ class MainWindow(QMainWindow):
         self.acquisition_card.start_requested.connect(self.start_acquisition)
         self.acquisition_card.resume_requested.connect(self.resume_acquisition)
         self.acquisition_card.stop_requested.connect(self.acquisition.stop)
-        self.acquisition_card.align_conveyor_requested.connect(
-            self._align_conveyor_for_resume
-        )
+        self.acquisition_card.align_conveyor_requested.connect(self._align_conveyor_for_resume)
         self.acquisition.running_changed.connect(self.acquisition_card.set_running)
         self.acquisition.resume_available_changed.connect(
             self.acquisition_card.set_resume_available
@@ -315,9 +299,7 @@ class MainWindow(QMainWindow):
             self.acquisition_card.set_alignment_required
         )
 
-    def _toggle(
-        self, adapter: CameraAdapter | ConveyorAdapter | RobotAdapter | LightAdapter
-    ) -> None:
+    def _toggle(self, adapter: CameraAdapter | ConveyorAdapter | LightAdapter) -> None:
         if adapter.state is ConnectionState.DISCONNECTED:
             adapter.connect()
         else:
@@ -325,7 +307,6 @@ class MainWindow(QMainWindow):
 
     def connect_all(self) -> None:
         self.camera.connect()
-        self.robot.connect()
         self.conveyor.connect()
         self.light.connect()
         self.light_2.connect()
@@ -333,7 +314,6 @@ class MainWindow(QMainWindow):
     def disconnect_all(self) -> None:
         self.acquisition.stop()
         self.camera.disconnect()
-        self.robot.disconnect()
         self.conveyor.disconnect()
         self.light.disconnect()
         self.light_2.disconnect()
@@ -407,9 +387,7 @@ class MainWindow(QMainWindow):
         was_running = self.inference_toggle.isChecked()
         if was_running:
             self.inference_toggle.setChecked(False)
-        self.inference_config = replace(
-            self._current_inference_config(), model_path=Path(filename)
-        )
+        self.inference_config = replace(self._current_inference_config(), model_path=Path(filename))
         self.inference_model.setText(filename)
         self.inference_model.setToolTip(filename)
         self.settings_store.save_live_inference(self.inference_config)
@@ -549,28 +527,6 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)  # type: ignore[arg-type]
         self._render_image()
 
-    def _robot_status(self, status: RobotStatus) -> None:
-        self.robot_card.set_status(status)
-        self._refresh_acquisition_preflight()
-        scaling = "–" if status.speed_scaling is None else f"{status.speed_scaling * 100:.0f} %"
-        joints = (
-            "–"
-            if not status.joint_positions
-            else ", ".join(f"{value:.3f}" for value in status.joint_positions)
-        )
-        tcp = "–" if not status.tcp_pose else ", ".join(f"{value:.4f}" for value in status.tcp_pose)
-        self.robot_card.details.setText(
-            f"RTDE/Dashboard: {'ja' if status.rtde_connected else 'nein'} / "
-            f"{'ja' if status.dashboard_connected else 'nein'}\n"
-            f"Robot/Safety Mode: {status.robot_mode} / {status.safety_mode}\n"
-            f"Remote: {status.remote_control} · Programm: {status.program_state}\n"
-            f"Geladen: {status.loaded_program}\n"
-            f"Speed Scaling: {scaling}\n"
-            f"Gelenke [rad]: {joints}\n"
-            f"TCP [m, rotvec]: {tcp}\n"
-            f"PolyScope: {status.polyscope_version}"
-        )
-
     def _conveyor_status(self, status: ConveyorStatus) -> None:
         self.conveyor_card.set_status(status)
         self._refresh_acquisition_preflight()
@@ -635,11 +591,10 @@ class MainWindow(QMainWindow):
         self.config = new_config
         self.settings_store.save(self.config)
         self.camera.config = self.config
-        self.robot.config = self.config
         self.conveyor.config = self.config
         self.light.config = self.config
         self.light_2.config = self.config
-        self.statusBar().showMessage(f"Kamera {self.config.camera_ip} · UR {self.config.robot_ip}")
+        self.statusBar().showMessage(f"Kamera {self.config.camera_ip} · SPS {self.config.plc_ip}")
         self._append_event("Einstellungen gespeichert; sie gelten ab der nächsten Verbindung.")
         self._refresh_acquisition_preflight()
 
@@ -697,7 +652,11 @@ class MainWindow(QMainWindow):
             )
             return
         count = len(build_capture_points(self.acquisition_config))
-        moving_devices = "UR und Förderband" if self.acquisition_config.conveyor_enabled else "UR"
+        movement = (
+            " und verfährt das Förderband automatisch"
+            if self.acquisition_config.conveyor_enabled
+            else ""
+        )
         interrupted = (
             "\n\nEine unterbrochene Sitzung ist vorhanden. Beim Start einer neuen Sitzung "
             "wird deren Fortsetzung verworfen."
@@ -706,8 +665,8 @@ class MainWindow(QMainWindow):
         )
         answer = QMessageBox.question(
             self,
-            "Automatische Roboterbewegung starten",
-            f"Die Sitzung umfasst {count} Aufnahmen und verfährt {moving_devices} automatisch.\n\n"
+            "Automatische Aufnahme starten",
+            f"Die Sitzung umfasst {count} Aufnahmen{movement}.\n\n"
             f"Ist der Arbeitsraum frei und darf die Sequenz gestartet werden?{interrupted}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -724,7 +683,7 @@ class MainWindow(QMainWindow):
             self,
             "Automatische Aufnahme fortsetzen",
             f"Es fehlen noch {remaining} Aufnahmen in:\n{session}\n\n"
-            "Die Hardware wird erneut geprüft; UR und gegebenenfalls Förderband fahren auf "
+            "Die Hardware wird erneut geprüft; bei aktiver Bandserie fährt das Förderband auf "
             "das nächste benötigte Ziel. "
             "Ist der Arbeitsraum frei und wurde die Fehlerursache behoben?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -740,7 +699,6 @@ class MainWindow(QMainWindow):
     def _acquisition_running(self, running: bool) -> None:
         for card in (
             self.camera_card,
-            self.robot_card,
             self.conveyor_card,
             self.light_card,
             self.light_2_card,
@@ -778,7 +736,6 @@ class MainWindow(QMainWindow):
         if self._training_dialog is not None:
             self._training_dialog.shutdown()
         self.camera.disconnect()
-        self.robot.disconnect()
         self.conveyor.disconnect()
         event.accept()
 
@@ -788,7 +745,6 @@ class MainWindow(QMainWindow):
             self._training_dialog.shutdown()
         self.acquisition.close()
         self.camera.disconnect()
-        self.robot.disconnect()
         self.conveyor.disconnect()
         await self.light.shutdown()
         await self.light_2.shutdown()

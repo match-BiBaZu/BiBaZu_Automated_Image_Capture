@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import queue
 import socket
 import threading
@@ -23,8 +24,27 @@ INCREMENTS_PER_FULL_STEP = 64
 UINT32_MODULUS = 1 << 32
 ENDPOINT_FEEDBACK_TOLERANCE_FULL_STEPS = 3
 ENDPOINT_FEEDBACK_TIMEOUT_SECONDS = 2.0
+MAX_BELT_SPEED_MM_S = 200.0
+MAX_FULL_STEPS_PER_S = 8148.733086
+# The velocity-only PLC does not correct the residual distance of a finite jog.
+POSITION_TOLERANCE_MM = 1.0
+NOMINAL_MM_PER_FULL_STEP = math.pi * 50.0 / (200.0 * 32.0)
+TANDEM_CONFIG_VALUES = {
+    "MAIN.ConveyorServoCommissioned": True,
+    "MAIN.ConveyorServoMotorCount": 2,
+    "MAIN.ConveyorServoSingleMotor": 1,
+    "MAIN.ConveyorServoDirection1": -1,
+    "MAIN.ConveyorServoDirection2": -1,
+    "MAIN.ConveyorServoMotor2Ratio": 1.0,
+    "MAIN.ConveyorServoMaxMotorRpm": 0.0,
+}
 
 STATUS_SYMBOLS = {
+    "MAIN.ConveyorCaptureInterfaceVersion": "capture_interface_version",
+    "MAIN.ConveyorServoVelocityOnly": "velocity_only",
+    "MAIN.ConveyorServoMotorCount": "motor_count",
+    "MAIN.ConveyorServoFaultCode": "servo_fault_code",
+    "MAIN.ConveyorServoAccelerationRpmPerSec": "acceleration_rpm_per_s",
     "MAIN.CalibrationBusy": "busy",
     "MAIN.CalibrationError": "error",
     "MAIN.CalibrationStatusCode": "status_code",
@@ -55,11 +75,23 @@ def full_steps_for_offset(offset_mm: float, mm_per_full_step: float) -> int:
 
 
 def speed_in_full_steps(speed_mm_per_s: float, mm_per_full_step: float) -> float:
-    if speed_mm_per_s <= 0.0:
-        raise ValueError("Die Förderbandgeschwindigkeit muss positiv sein.")
+    if not 0.1 <= speed_mm_per_s <= MAX_BELT_SPEED_MM_S:
+        raise ValueError("Die Förderbandgeschwindigkeit muss zwischen 0,1 und 200 mm/s liegen.")
     if mm_per_full_step <= 0.0:
         raise ValueError("Die Förderbandkalibrierung ist ungültig.")
-    return max(1.0, min(500.0, float(speed_mm_per_s) / float(mm_per_full_step)))
+    return max(1.0, min(MAX_FULL_STEPS_PER_S, float(speed_mm_per_s) / mm_per_full_step))
+
+
+def move_duration_seconds(
+    distance_steps: float, speed_steps_s: float, acceleration_rpm_s: float
+) -> float:
+    """Include the common motor acceleration and deceleration of a finite jog."""
+    acceleration = max(0.001, acceleration_rpm_s * 200.0 / 60.0)
+    distance = abs(distance_steps)
+    speed = max(0.001, speed_steps_s)
+    if distance <= speed * speed / acceleration:
+        return 2.0 * math.sqrt(distance / acceleration)
+    return distance / speed + speed / acceleration
 
 
 def effective_direction_sign(plc_direction: str, conveyor_reverse: bool) -> int:
@@ -87,11 +119,17 @@ def move_position_matches(
     internal_position: int | None,
     conveyor_reverse: bool,
     tolerance_full_steps: int = ENDPOINT_FEEDBACK_TOLERANCE_FULL_STEPS,
+    *,
+    mm_per_full_step: float | None = None,
+    tolerance_mm: float | None = None,
 ) -> bool:
     expected = expected_move_internal_position(move, conveyor_reverse)
     if expected is None or internal_position is None:
         return False
     difference = abs(signed_u32_delta(internal_position, expected))
+    if mm_per_full_step is not None and tolerance_mm is not None:
+        tolerance = max(tolerance_mm, max(0, tolerance_full_steps) * mm_per_full_step)
+        return difference / INCREMENTS_PER_FULL_STEP * mm_per_full_step <= tolerance
     return difference <= max(0, tolerance_full_steps) * INCREMENTS_PER_FULL_STEP
 
 
@@ -116,6 +154,7 @@ class ConveyorWorker(QObject):
         super().__init__()
         self._config = config
         self._stop = threading.Event()
+        self._cancel_motion = threading.Event()
         self._commands: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self._requested_move: ConveyorMove | None = None
         self._completed_sequence: int | None = None
@@ -133,13 +172,81 @@ class ConveyorWorker(QObject):
         self._commands.put(("move", move))
 
     def enqueue_stop(self) -> None:
+        self._cancel_motion.set()
         self._commands.put(("stop", None))
 
     def enqueue_release(self) -> None:
+        self._cancel_motion.set()
         self._commands.put(("release", None))
 
     def stop(self) -> None:
+        self._cancel_motion.set()
         self._stop.set()
+
+    def _wait_tandem(self, plc: Any, predicate: Any, message: str) -> None:
+        names = [
+            "MAIN.StepperPosBusy",
+            "MAIN.StepperPosError",
+            "MAIN.ConveyorServoFaultCode",
+            "MAIN.ConveyorServoState",
+            "MAIN.ConveyorServo1TargetVelocity",
+            "MAIN.ConveyorServo2TargetVelocity",
+        ]
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if self._cancel_motion.is_set() or self._stop.is_set():
+                raise RuntimeError("Förderbandvorbereitung abgebrochen.")
+            values = plc.read_list_by_name(names, cache_symbol_info=True)
+            if predicate(values):
+                return
+            self._cancel_motion.wait(0.05)
+        raise RuntimeError(message)
+
+    def _prepare_tandem(self, plc: Any, pyads: Any) -> None:
+        """Use the same stopped tandem configuration as PressureControlGUI."""
+        marker = plc.read_list_by_name(
+            ["MAIN.ConveyorServoVelocityOnly", "MAIN.ConveyorCaptureInterfaceVersion"],
+            cache_symbol_info=True,
+        )
+        if (
+            not bool(marker["MAIN.ConveyorServoVelocityOnly"])
+            or int(marker["MAIN.ConveyorCaptureInterfaceVersion"]) != 1
+        ):
+            raise RuntimeError("Die SPS enthält nicht das Zweimotoren-Geschwindigkeitsprogramm.")
+        self._write_values(plc, self._safe_values(), pyads)
+        self._wait_tandem(
+            plc,
+            lambda v: (
+                not v["MAIN.StepperPosBusy"]
+                and v["MAIN.ConveyorServo1TargetVelocity"] == 0
+                and v["MAIN.ConveyorServo2TargetVelocity"] == 0
+            ),
+            "Beide Förderbandmotoren müssen vor der Konfiguration stillstehen.",
+        )
+        config = dict(TANDEM_CONFIG_VALUES)
+        if (
+            self._requested_move is not None
+            and self._requested_move.acceleration_rpm_per_s is not None
+        ):
+            config["MAIN.ConveyorServoAccelerationRpmPerSec"] = (
+                self._requested_move.acceleration_rpm_per_s
+            )
+        self._write_values(plc, config, pyads)
+        if self._cancel_motion.wait(0.25) or self._stop.is_set():
+            raise RuntimeError("Förderbandvorbereitung abgebrochen.")
+        self._write_values(plc, {"MAIN.GuiConveyorReset": True}, pyads)
+        if self._cancel_motion.wait(0.05) or self._stop.is_set():
+            raise RuntimeError("Förderbandvorbereitung abgebrochen.")
+        self._wait_tandem(
+            plc,
+            lambda v: (
+                not v["MAIN.StepperPosBusy"]
+                and not v["MAIN.StepperPosError"]
+                and v["MAIN.ConveyorServoFaultCode"] == 0
+                and v["MAIN.ConveyorServoState"] == 0
+            ),
+            "Die Tandem-Konfiguration wurde von der SPS nicht übernommen.",
+        )
 
     @staticmethod
     def _safe_values() -> dict[str, object]:
@@ -169,6 +276,7 @@ class ConveyorWorker(QObject):
             self._movement_started_sequence = None
             self._completion_feedback_wait_started = None
             self.event_message.emit("Förderband-Stop an die SPS gesendet.")
+            self._cancel_motion.clear()
             return
         if command == "release":
             self._write_values(plc, self._safe_values(), pyads)
@@ -179,11 +287,18 @@ class ConveyorWorker(QObject):
             self._movement_started_sequence = None
             self._completion_feedback_wait_started = None
             self.event_message.emit("Förderbandsteuerung freigegeben und gestoppt.")
+            self._cancel_motion.clear()
             return
         if command != "move" or not isinstance(payload, ConveyorMove):
             return
         if self._requested_move is not None:
             raise RuntimeError("Eine Förderbandfahrt ist bereits aktiv.")
+        self._requested_move = payload
+        try:
+            self._prepare_tandem(plc, pyads)
+        except Exception as exc:
+            self._fail_move(plc, pyads, str(exc))
+            return
         self._write_values(
             plc,
             {
@@ -206,6 +321,9 @@ class ConveyorWorker(QObject):
     def _issue_move_command(self, plc: Any, pyads: Any) -> None:
         move = self._requested_move
         if move is None:
+            return
+        if self._cancel_motion.is_set() or self._stop.is_set():
+            self._fail_move(plc, pyads, "Förderbandfahrt abgebrochen.")
             return
         direction_symbol = (
             "MAIN.GuiCalibrationMoveLeft"
@@ -304,6 +422,15 @@ class ConveyorWorker(QObject):
                     values = plc.read_list_by_name(list(STATUS_SYMBOLS), cache_symbol_info=True)
                     status = ConveyorStatus(
                         connected=True,
+                        capture_interface_version=int(
+                            values["MAIN.ConveyorCaptureInterfaceVersion"]
+                        ),
+                        velocity_only=bool(values["MAIN.ConveyorServoVelocityOnly"]),
+                        motor_count=int(values["MAIN.ConveyorServoMotorCount"]),
+                        servo_fault_code=int(values["MAIN.ConveyorServoFaultCode"]),
+                        acceleration_rpm_per_s=float(
+                            values["MAIN.ConveyorServoAccelerationRpmPerSec"]
+                        ),
                         calibration_valid=bool(values["MAIN.GuiConveyorCalibrationValid"]),
                         mm_per_full_step=float(values["MAIN.GuiConveyorMmPerFullStep"]),
                         ready_to_execute=bool(values["MAIN.StepperPosReadyToExecute"]),
@@ -382,6 +509,8 @@ class ConveyorWorker(QObject):
                                 move,
                                 status.internal_position,
                                 status.conveyor_reverse,
+                                mm_per_full_step=status.mm_per_full_step,
+                                tolerance_mm=POSITION_TOLERANCE_MM,
                             )
                             if feedback_matches or move.start_internal_position is None:
                                 self._completed_sequence = move.sequence
@@ -600,7 +729,16 @@ class ConveyorAdapter(DeviceAdapter):
             return None
         return self._worker
 
-    def request_offset(self, offset_mm: float, speed_mm_per_s: float) -> int | None:
+    def request_offset(
+        self, offset_mm: float, speed_mm_per_s: float, acceleration_rpm_per_s: float | None = None
+    ) -> int | None:
+        try:
+            speed_in_full_steps(speed_mm_per_s, self._status.mm_per_full_step)
+            if acceleration_rpm_per_s is not None and not 0.1 <= acceleration_rpm_per_s <= 1000.0:
+                raise ValueError("Die Motorbeschleunigung muss zwischen 0,1 und 1000 rpm/s liegen.")
+        except ValueError as exc:
+            self._emit_error(str(exc))
+            return None
         worker = self._ready_worker()
         if worker is None:
             return None
@@ -625,6 +763,9 @@ class ConveyorAdapter(DeviceAdapter):
         current_increments = signed_u32_delta(current_position, self._origin_position)
         current_steps = round(current_increments * sign / INCREMENTS_PER_FULL_STEP)
         delta_steps = target_steps - current_steps
+        if abs(delta_steps) > 250000:
+            self._emit_error("Die Fahrstrecke überschreitet 250000 virtuelle Vollschritte.")
+            return None
         if delta_steps == 0:
             move = ConveyorMove(
                 sequence=0,
@@ -642,7 +783,6 @@ class ConveyorAdapter(DeviceAdapter):
             )
             self._status.requested_offset_mm = float(offset_mm)
             self._status.actual_target_offset_mm = target_steps * self._status.mm_per_full_step
-            self._status.logical_offset_mm = self._status.actual_target_offset_mm
             self._status.last_move = move
             self.status_changed.emit(replace(self._status))
             return 0
@@ -661,6 +801,7 @@ class ConveyorAdapter(DeviceAdapter):
             plc_direction=plc_direction,
             start_internal_position=self._status.internal_position,
             commanded_at=time.time(),
+            acceleration_rpm_per_s=acceleration_rpm_per_s,
         )
         self._status.requested_sequence = move.sequence
         self._status.requested_offset_mm = move.requested_offset_mm
@@ -723,8 +864,9 @@ class ConveyorAdapter(DeviceAdapter):
         if self._status.logical_offset_mm is None or self._status.mm_per_full_step <= 0.0:
             return False
         expected = full_steps_for_offset(offset_mm, self._status.mm_per_full_step)
-        actual = round(self._status.logical_offset_mm / self._status.mm_per_full_step)
-        return abs(actual - expected) <= tolerance_full_steps
+        tolerance = max(POSITION_TOLERANCE_MM, tolerance_full_steps * self._status.mm_per_full_step)
+        expected_mm = expected * self._status.mm_per_full_step
+        return abs(self._status.logical_offset_mm - expected_mm) <= tolerance
 
     def disconnect(self) -> None:
         worker, thread = self._worker, self._thread

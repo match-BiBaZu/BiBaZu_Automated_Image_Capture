@@ -167,7 +167,7 @@ class AnchorReviewDialog(QDialog):
         layout = QVBoxLayout(self)
         explanation = QLabel(
             "Grün markiert eine zuverlässige Einzelsegmentierung (ANKER), Orange eine daraus "
-            "berechnete Box (BAHNMODELL). Pro Roboterwinkel wird der Mittelpunkt auf einer "
+            "berechnete Box (BAHNMODELL). Pro Ansicht wird der Mittelpunkt auf einer "
             "geraden Förderbandbahn geführt. Bitte nur übernehmen, wenn alle Boxen das "
             "Bauteil eng und vollständig umschließen."
         )
@@ -180,7 +180,7 @@ class AnchorReviewDialog(QDialog):
         for item in items:
             title = QLabel(
                 f"Klasse {item.class_id}: {item.class_name} · "
-                f"UR {item.pose_id / 10.0:.1f}° · "
+                f"Ansicht {item.pose_id} · "
                 f"{item.anchor_count}/{item.image_count} sichere Anker"
             )
             title.setStyleSheet("font-weight:600;")
@@ -242,7 +242,7 @@ class VisibilityReviewDialog(QDialog):
             entry = QListWidgetItem(QIcon(str(review.preview_path)), "")
             entry.setText(
                 f"Klasse {review.class_id}: {review.class_name} · "
-                f"UR {review.pose_id / 10.0:.1f}°\n"
+                f"Ansicht {review.pose_id}\n"
                 f"Score {review.score:.2f} · {review.reason}\n{review.source_path.name}"
             )
             entry.setData(Qt.ItemDataRole.UserRole, str(review.source_path))
@@ -325,7 +325,7 @@ class LabelingDialog(QDialog):
         layout = QVBoxLayout(self)
         explanation = QLabel(
             "Jede Pose in der Liste wird eine eigene YOLO-Klasse. Das Tool paart ihre "
-            "Aufnahmen mit dem Leerbild derselben UR-Ansicht und Beleuchtung. Bei klassischen "
+            "Aufnahmen mit dem Leerbild derselben Kameraansicht und Beleuchtung. Bei klassischen "
             "Rasterserien entsteht aus wiederholten Bildern derselben Ansicht eine gemeinsame "
             "OBB. Synchronisierte Förderbandserien werden dagegen winkelweise als vollständige "
             "Bahn ausgewertet: Die gemessene ADS-Position stabilisiert die OBB und ergänzt "
@@ -597,7 +597,7 @@ class LabelingDialog(QDialog):
         )
         self.status.setText(
             f"Fertig: {result.positive_images} positive und {result.negative_images} negative "
-            f"Bilder, {result.classes} Klassen und {result.poses} UR-Ansichten, "
+            f"Bilder, {result.classes} Klassen und {result.poses} Kameraansichten, "
             f"{result.flagged_images} Bilder zur Nachprüfung. "
             f"{result.excluded_images} schlecht sichtbare Bilder ausgeschlossen. "
             f"Positionsbahn: {result.position_tracked_images} Bilder, "

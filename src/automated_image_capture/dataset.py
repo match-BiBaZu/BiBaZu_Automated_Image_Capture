@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import shutil
@@ -135,6 +136,8 @@ def default_build_config() -> DatasetBuildConfig:
 
 
 def split_for_pose(pose_id: int) -> Split:
+    if pose_id == 0:
+        return "train"  # Fixed views are assigned by complete lighting groups below.
     if pose_id in TRAIN_POSES:
         return "train"
     if pose_id in VALIDATION_POSES:
@@ -174,16 +177,16 @@ def _source_split(root: Path, image: Path, label: Path, pose_id: int) -> Split:
     image_split = _explicit_source_split(root, "images", image)
     label_split = _explicit_source_split(root, "labels", label)
     if image_split is not None and label_split is not None and image_split != label_split:
-        raise DatasetError(
-            f"Bild und Label liegen in unterschiedlichen Splits: {image.name}"
-        )
+        raise DatasetError(f"Bild und Label liegen in unterschiedlichen Splits: {image.name}")
     return image_split or label_split or split_for_pose(pose_id)
 
 
 def _robot_mode(row: dict[str, str], dataset_image: str) -> str:
     configured = row.get("robot_mode", "").strip().casefold()
-    if configured in {"angle", "pose_id"}:
+    if configured in {"angle", "pose_id", "fixed"}:
         return configured
+    if "_fixed_" in dataset_image.casefold():
+        return "fixed"
     return "angle" if "_ura-" in dataset_image.casefold() else "pose_id"
 
 
@@ -395,6 +398,26 @@ def save_curation(
 
 def _complete_evaluation_splits(records: list[DatasetRecord]) -> list[DatasetRecord]:
     """Create missing val/test splits by holding out complete UR poses or angles."""
+    fixed = [record for record in records if record.robot_mode == "fixed"]
+    if fixed:
+        legacy = [record for record in records if record.robot_mode != "fixed"]
+        groups = sorted(
+            {(record.panel_1, record.panel_2) for record in fixed},
+            key=lambda pair: hashlib.sha256(f"fixed-light:{pair[0]}:{pair[1]}".encode()).digest(),
+        )
+        assignments_fixed: dict[tuple[int, int], Split] = dict.fromkeys(groups, "train")
+        if len(groups) >= 3:
+            held_out = max(1, round(len(groups) * 0.15))
+            for group in groups[:held_out]:
+                assignments_fixed[group] = "val"
+            for group in groups[held_out : 2 * held_out]:
+                assignments_fixed[group] = "test"
+        # Keep all exposures, stations, directions, classes and empty references
+        # for each lighting group together; do not shuffle neighboring frames.
+        return _complete_evaluation_splits(legacy) + [
+            replace(record, split=assignments_fixed[(record.panel_1, record.panel_2)])
+            for record in fixed
+        ]
     pose_splits = {
         pose_id: next(record.split for record in records if record.pose_id == pose_id)
         for pose_id in {record.pose_id for record in records}
@@ -403,9 +426,7 @@ def _complete_evaluation_splits(records: list[DatasetRecord]) -> list[DatasetRec
     for missing_split in ("val", "test"):
         if missing_split in pose_splits.values():
             continue
-        candidates = sorted(
-            pose_id for pose_id, split in pose_splits.items() if split == "train"
-        )
+        candidates = sorted(pose_id for pose_id, split in pose_splits.items() if split == "train")
         if len(candidates) <= 1:
             continue
         candidate_index = len(candidates) // 2 if missing_split == "val" else -1
@@ -415,8 +436,7 @@ def _complete_evaluation_splits(records: list[DatasetRecord]) -> list[DatasetRec
     if not assignments:
         return records
     return [
-        replace(record, split=assignments.get(record.pose_id, record.split))
-        for record in records
+        replace(record, split=assignments.get(record.pose_id, record.split)) for record in records
     ]
 
 
@@ -437,18 +457,17 @@ def collect_dataset_records(config: DatasetBuildConfig) -> list[DatasetRecord]:
         raise DatasetError(f"Doppelte Zieldateinamen: {duplicate_targets[:3]}")
     pose_splits: dict[int, set[Split]] = {}
     for record in records:
+        if record.robot_mode == "fixed":
+            continue
         pose_splits.setdefault(record.pose_id, set()).add(record.split)
     conflicting = {
-        pose_id: sorted(splits)
-        for pose_id, splits in pose_splits.items()
-        if len(splits) > 1
+        pose_id: sorted(splits) for pose_id, splits in pose_splits.items() if len(splits) > 1
     }
     if conflicting:
         raise DatasetError(
             "UR-Winkel/-Posen liegen in mehreren Splits: "
             + ", ".join(
-                f"{pose_id} ({'/'.join(splits)})"
-                for pose_id, splits in sorted(conflicting.items())
+                f"{pose_id} ({'/'.join(splits)})" for pose_id, splits in sorted(conflicting.items())
             )
         )
     records = _complete_evaluation_splits(records)
@@ -488,7 +507,9 @@ def render_record_preview(record: DatasetRecord, max_width: int = 1100) -> np.nd
         points = normalized * np.asarray([width, height], dtype=np.float32)
         cv2.polylines(image, [np.rint(points).astype(np.int32)], True, (0, 255, 0), 5)
     robot_value = (
-        f"{record.pose_id / 10.0:.1f} deg"
+        "Feste Ansicht"
+        if record.robot_mode == "fixed"
+        else f"{record.pose_id / 10.0:.1f} deg"
         if record.robot_mode == "angle"
         else str(record.pose_id)
     )
@@ -498,7 +519,7 @@ def render_record_preview(record: DatasetRecord, max_width: int = 1100) -> np.nd
         else f" | Band {record.conveyor_measured_position_mm:.1f} mm"
     )
     label = (
-        f"{record.class_name} | UR {robot_value}{belt} | "
+        f"{record.class_name} | {robot_value}{belt} | "
         f"P1 {record.panel_1}% | P2 {record.panel_2}% | {record.quality}"
     )
     cv2.putText(image, label, (16, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
@@ -545,8 +566,7 @@ def _data_yaml_text(root: Path, class_names: dict[int, str]) -> str:
         "train: images/train\n"
         "val: images/val\n"
         "test: images/test\n"
-        "names:\n"
-        + names
+        "names:\n" + names
     )
 
 
@@ -567,8 +587,7 @@ def build_curated_dataset(
     ]
     if missing_splits:
         raise DatasetError(
-            "Nach der Kuratierung fehlen Bilder in folgenden Splits: "
-            + ", ".join(missing_splits)
+            "Nach der Kuratierung fehlen Bilder in folgenden Splits: " + ", ".join(missing_splits)
         )
     output = _version_directory(config)
     output.mkdir(parents=True)
@@ -606,7 +625,18 @@ def build_curated_dataset(
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "classes": {str(class_id): name for class_id, name in class_names.items()},
         "splits": {
-            "strategy": "source folders; missing val/test use complete-angle holdouts",
+            "strategy": "fixed views: complete lighting pairs (70/15/15); "
+            "legacy views: source folders and complete-view holdouts",
+            "fixed_lighting_pairs": {
+                split: sorted(
+                    {
+                        (record.panel_1, record.panel_2)
+                        for record in records
+                        if record.robot_mode == "fixed" and record.split == split
+                    }
+                )
+                for split in ("train", "val", "test")
+            },
             "train_poses": split_poses["train"],
             "validation_poses": split_poses["val"],
             "test_poses": split_poses["test"],
@@ -656,8 +686,7 @@ def verify_curated_dataset(directory: Path) -> DatasetIntegrityResult:
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             class_names = {
-                int(class_id): str(name)
-                for class_id, name in manifest.get("classes", {}).items()
+                int(class_id): str(name) for class_id, name in manifest.get("classes", {}).items()
             }
             if not class_names:
                 errors.append("Manifest enthält keine Klassen")
@@ -718,9 +747,7 @@ def prepare_resized_training_dataset(
         raise DatasetError("Die Trainingskantenlänge muss mindestens 128 Pixel betragen.")
     source_integrity = verify_curated_dataset(source)
     if not source_integrity.valid:
-        raise DatasetError(
-            "Quelldatensatz ist ungültig: " + "; ".join(source_integrity.errors[:5])
-        )
+        raise DatasetError("Quelldatensatz ist ungültig: " + "; ".join(source_integrity.errors[:5]))
     output = source.parent / f"{source.name}_imgsz{max_edge}"
     marker = output / "resize_manifest.json"
     if marker.is_file():
@@ -735,9 +762,7 @@ def prepare_resized_training_dataset(
                     return ResizedDatasetResult(output, integrity.image_count, True)
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
             pass
-        raise DatasetError(
-            f"Vorhandener Trainingscache ist unvollständig oder veraltet: {output}"
-        )
+        raise DatasetError(f"Vorhandener Trainingscache ist unvollständig oder veraltet: {output}")
     if output.exists():
         raise DatasetError(f"Trainingscache existiert ohne gültiges Manifest: {output}")
     for split in ("train", "val", "test"):
@@ -765,9 +790,7 @@ def prepare_resized_training_dataset(
             )
         target = output / "images" / split / image_path.name
         parameters = (
-            [cv2.IMWRITE_PNG_COMPRESSION, 3]
-            if image_path.suffix.casefold() == ".png"
-            else []
+            [cv2.IMWRITE_PNG_COMPRESSION, 3] if image_path.suffix.casefold() == ".png" else []
         )
         if not cv2.imwrite(str(target), image, parameters):
             raise DatasetError(f"Trainingsbild kann nicht geschrieben werden: {target}")
@@ -777,9 +800,7 @@ def prepare_resized_training_dataset(
         if progress is not None:
             progress(index, total, f"Trainingscache {index}/{total}")
 
-    source_manifest = json.loads(
-        (source / "dataset_manifest.json").read_text(encoding="utf-8")
-    )
+    source_manifest = json.loads((source / "dataset_manifest.json").read_text(encoding="utf-8"))
     source_manifest["derived_from"] = str(source)
     source_manifest["image_max_edge"] = max_edge
     source_manifest["created_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -791,12 +812,9 @@ def prepare_resized_training_dataset(
     if curation.is_file():
         shutil.copy2(curation, output / "curation.json")
     class_names = {
-        int(class_id): str(name)
-        for class_id, name in source_manifest.get("classes", {}).items()
+        int(class_id): str(name) for class_id, name in source_manifest.get("classes", {}).items()
     }
-    (output / "data.yaml").write_text(
-        _data_yaml_text(output, class_names), encoding="utf-8"
-    )
+    (output / "data.yaml").write_text(_data_yaml_text(output, class_names), encoding="utf-8")
     integrity = verify_curated_dataset(output)
     if not integrity.valid or integrity.image_count != source_integrity.image_count:
         details = "; ".join(integrity.errors[:5]) or "abweichende Bildanzahl"

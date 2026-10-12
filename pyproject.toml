@@ -23,7 +23,6 @@ dependencies = [
     "torch==2.7.1",
     "torchvision==0.22.1",
     "ultralytics==8.4.102",
-    "ur-rtde==1.6.3",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +43,7 @@ packages = ["src/automated_image_capture"]
 addopts = "-ra"
 testpaths = ["tests"]
 markers = [
-    "hardware: requires the physical camera, robot, or BLE light",
+    "hardware: requires the physical camera, conveyor, or BLE light",
     "training: requires Ultralytics model weights and optionally a CUDA GPU",
 ]
 

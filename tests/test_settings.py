@@ -14,7 +14,6 @@ def test_settings_round_trip(tmp_path) -> None:
     store = SettingsStore(backend)
     expected = AppSettings(
         camera_ip="169.254.117.70",
-        robot_ip="10.10.10.10",
         plc_ip="192.168.10.23",
         plc_ams_net_id="10.145.4.14.1.1",
         plc_port=851,
@@ -35,7 +34,7 @@ def test_settings_round_trip(tmp_path) -> None:
     assert store.load() == expected
 
 
-@pytest.mark.parametrize("field", ["camera_ip", "robot_ip"])
+@pytest.mark.parametrize("field", ["camera_ip", "plc_ip"])
 def test_invalid_ip_is_rejected(field: str) -> None:
     values = {field: "not-an-ip"}
     with pytest.raises(ValueError):
@@ -53,8 +52,6 @@ def test_acquisition_settings_round_trip(tmp_path) -> None:
     expected = AcquisitionSettings(
         output_directory=tmp_path / "dataset",
         capture_mode="ramp",
-        pose_start=160,
-        pose_end=200,
         light_1_start=10,
         light_1_end=80,
         light_1_step=5,
@@ -69,10 +66,6 @@ def test_acquisition_settings_round_trip(tmp_path) -> None:
         ramp_image_rate_fps=8,
         ramp_light_1_period_s=1.6,
         ramp_light_2_period_s=12.5,
-        robot_control_mode="angle",
-        angle_start_deg=15.5,
-        angle_end_deg=20.5,
-        angle_step_deg=0.5,
         conveyor_enabled=True,
         conveyor_motion_mode="synchronized",
         conveyor_max_offset_mm=50.0,
@@ -139,3 +132,21 @@ def test_training_paths_round_trip(tmp_path) -> None:
         "output_root": output,
         "dataset_directory": dataset,
     }
+
+
+def test_retired_robot_settings_do_not_block_existing_light_and_camera_preferences(
+    tmp_path,
+) -> None:
+    backend = QSettings(str(tmp_path / "legacy_robot.ini"), QSettings.Format.IniFormat)
+    backend.setValue("robot/ip", "old-invalid-address")
+    backend.setValue("acquisition/robot_control_mode", "angle")
+    backend.setValue("acquisition/angle_start_deg", "old-invalid-angle")
+    backend.setValue("acquisition/light_1_start", 20)
+    backend.setValue("camera/preview_max_fps", 12)
+    backend.setValue("light/address", "OLD-LIGHT")
+    store = SettingsStore(backend)
+
+    assert store.load().validated().preview_max_fps == 12
+    assert store.load().light_address == "OLD-LIGHT"
+    assert store.load_acquisition().light_1_start == 20
+    assert not hasattr(store.load(), "robot_ip")

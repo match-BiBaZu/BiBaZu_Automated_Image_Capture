@@ -215,9 +215,8 @@ class VisibilityReviewItem:
     recommended_exclude: bool
 
 
-VisibilityReviewCallback = Callable[
-    [tuple[VisibilityReviewItem, ...]], frozenset[Path] | None
-]
+VisibilityReviewCallback = Callable[[tuple[VisibilityReviewItem, ...]], frozenset[Path] | None]
+
 
 def _labeling_worker_count(item_count: int) -> int:
     logical_cpus = os.cpu_count() or 2
@@ -308,12 +307,18 @@ def scan_capture(directory: Path) -> dict[CaptureKey, CaptureRecord]:
         if match is None:
             continue
         key = CaptureKey(
-            pose_id=int(match.group("pose") or match.group("angle")),
+            pose_id=int(match.group("pose") or match.group("angle") or 0),
             panel_2=int(match.group("p2")),
             panel_1=int(match.group("p1")),
             exposure=match.group("exposure").lower(),
             ramp_sample_id=(None if match.group("ramp") is None else int(match.group("ramp"))),
-            robot_mode="angle" if match.group("angle") is not None else "pose_id",
+            robot_mode=(
+                "fixed"
+                if match.group("fixed")
+                else "angle"
+                if match.group("angle") is not None
+                else "pose_id"
+            ),
             conveyor_station_id=(0 if match.group("belt") is None else int(match.group("belt"))),
             conveyor_position_tenths_mm=(
                 0 if match.group("position") is None else int(match.group("position"))
@@ -604,16 +609,9 @@ def _box_from_shadow_trimmed_mask(mask: np.ndarray, margin: int) -> np.ndarray:
     edge_pad_bins = int(math.ceil(16.0 / bin_width))
     left_tail_bins = run_start - int(np.min(bins))
     right_tail_bins = int(np.max(bins)) - run_end
-    left_allowance = (
-        left_tail_bins if left_tail_bins <= maximum_feature_bins else edge_pad_bins
-    )
-    right_allowance = (
-        right_tail_bins if right_tail_bins <= maximum_feature_bins else edge_pad_bins
-    )
-    keep = (
-        (bins >= run_start - left_allowance)
-        & (bins <= run_end + right_allowance)
-    )
+    left_allowance = left_tail_bins if left_tail_bins <= maximum_feature_bins else edge_pad_bins
+    right_allowance = right_tail_bins if right_tail_bins <= maximum_feature_bins else edge_pad_bins
+    keep = (bins >= run_start - left_allowance) & (bins <= run_end + right_allowance)
     retained = coordinates[keep]
     if len(retained) < 4:
         raise LabelingError("Zu wenige Bauteilpunkte nach der Schattenbereinigung.")
@@ -769,9 +767,7 @@ def _spatial_line_seed(
             direction = delta / length
             offsets = centers - centers[left]
             projections = offsets @ direction
-            perpendicular = np.abs(
-                offsets[:, 0] * direction[1] - offsets[:, 1] * direction[0]
-            )
+            perpendicular = np.abs(offsets[:, 0] * direction[1] - offsets[:, 1] * direction[0])
             inliers = perpendicular <= 16.0
             count = int(np.count_nonzero(inliers))
             if count < 6:
@@ -800,11 +796,7 @@ def stabilize_boxes_by_conveyor_position(
     enough *measured* ADS positions span a useful distance do we fit a robust trajectory.
     This keeps old captures and stationary grids byte-for-byte compatible.
     """
-    result = {
-        pair.foreground.path: raw_box
-        for _, pair, raw_box in entries
-        if raw_box is not None
-    }
+    result = {pair.foreground.path: raw_box for _, pair, raw_box in entries if raw_box is not None}
     usable = [
         (row, pair, raw_box)
         for row, pair, raw_box in entries
@@ -818,7 +810,6 @@ def stabilize_boxes_by_conveyor_position(
         [pair.foreground.measured_conveyor_position_mm for _, pair, _ in usable],
         dtype=np.float64,
     )
-
 
     if float(np.ptp(positions)) < 5.0:
         return result, ConveyorTrackSummary(False)
@@ -880,9 +871,7 @@ def stabilize_boxes_by_conveyor_position(
                 (positions[center_inliers], np.ones(np.count_nonzero(center_inliers)))
             )
             coefficients = np.linalg.lstsq(design, centers[center_inliers], rcond=None)[0]
-            predicted_centers = (
-                np.column_stack((positions, np.ones(len(positions)))) @ coefficients
-            )
+            predicted_centers = np.column_stack((positions, np.ones(len(positions)))) @ coefficients
             center_residuals = np.linalg.norm(centers - predicted_centers, axis=1)
             inlier_residuals = center_residuals[center_inliers]
             median = float(np.median(inlier_residuals))
@@ -933,9 +922,7 @@ def stabilize_boxes_by_conveyor_position(
             (positions[geometry_inliers], np.ones(np.count_nonzero(geometry_inliers)))
         )
         coefficients = np.linalg.lstsq(design, centers[geometry_inliers], rcond=None)[0]
-        predicted_centers = (
-            np.column_stack((positions, np.ones(len(positions)))) @ coefficients
-        )
+        predicted_centers = np.column_stack((positions, np.ones(len(positions)))) @ coefficients
     center_residuals = np.linalg.norm(centers - predicted_centers, axis=1)
     center_median = float(np.median(center_residuals[geometry_inliers]))
 
@@ -960,9 +947,7 @@ def stabilize_boxes_by_conveyor_position(
         all_progression = progression_model.predict(all_positions)
         all_predicted = line_origin + all_progression[:, None] * line_direction
     else:
-        all_predicted = (
-            np.column_stack((all_positions, np.ones(len(all_positions)))) @ coefficients
-        )
+        all_predicted = np.column_stack((all_positions, np.ones(len(all_positions)))) @ coefficients
     all_predicted_x = all_predicted[:, 0]
     all_predicted_y = all_predicted[:, 1]
     residual_by_path = {
@@ -988,9 +973,7 @@ def stabilize_boxes_by_conveyor_position(
         box_iou = None if raw_box is None else _convex_box_iou(raw_box, predicted)
         missing_candidate = raw_box is None
         is_outlier = bool(
-            missing_candidate
-            or not center_is_inlier
-            or (box_iou is not None and box_iou < 0.35)
+            missing_candidate or not center_is_inlier or (box_iou is not None and box_iou < 0.35)
         )
         was_corrected = bool(
             missing_candidate
@@ -1000,9 +983,7 @@ def stabilize_boxes_by_conveyor_position(
         )
         result[pair.foreground.path] = predicted
         row["conveyor_track_used"] = True
-        row["track_center_residual_pixels"] = (
-            None if residual is None else round(residual, 3)
-        )
+        row["track_center_residual_pixels"] = None if residual is None else round(residual, 3)
         row["track_raw_box_iou"] = None if box_iou is None else round(box_iou, 6)
         row["track_correction_applied"] = was_corrected
         row["obb_center_x_pixels"] = round(float(all_predicted_x[index]), 3)
@@ -1092,7 +1073,7 @@ def build_conveyor_track(
             progress(
                 progress_offset + done,
                 progress_total,
-                f"Segmentiere Förderbandbahn bei Winkel {pose_id / 10.0:.1f}°",
+                f"Segmentiere Förderbandbahn für Ansicht {pose_id}",
             )
 
     processed = _parallel_map_ordered(
@@ -1115,7 +1096,7 @@ def build_conveyor_track(
     if not summary.active or len(boxes) != len(pairs):
         candidates = sum(raw_box is not None for _, _, raw_box in entries)
         raise LabelingError(
-            f"Winkel {pose_id / 10.0:.1f}°: nur {candidates} von {len(pairs)} Bildern "
+            f"Ansicht {pose_id}: nur {candidates} von {len(pairs)} Bildern "
             "liefern eine brauchbare Einzelsegmentierung; daraus konnte keine stabile "
             "Förderbandbahn bestimmt werden."
         )
@@ -1279,9 +1260,7 @@ def _make_review_sheet(
             f"P2={pair.foreground.key.panel_2}"
             + ("" if sample is None else f"  Ramp={sample}")
             + (
-                ""
-                if measured_position is None
-                else f"  Band={measured_position:.1f} mm (gemessen)"
+                "" if measured_position is None else f"  Band={measured_position:.1f} mm (gemessen)"
             ),
             (25, 55),
             cv2.FONT_HERSHEY_SIMPLEX,
@@ -1594,9 +1573,7 @@ def generate_obb_dataset(
                 row["class_name"] = source.name
                 row["source_directory"] = str(source.directory)
                 row["conveyor_station_id"] = station_id
-                row["conveyor_position_mm"] = (
-                    pair.foreground.key.conveyor_position_tenths_mm / 10.0
-                )
+                row["conveyor_position_mm"] = pair.foreground.key.conveyor_position_tenths_mm / 10.0
                 row["conveyor_direction"] = pair.foreground.key.conveyor_direction
                 report_rows.append(row)
                 write_records.append((row, pair, class_id, source))
@@ -1751,7 +1728,7 @@ def generate_obb_dataset(
             progress(
                 completed,
                 total_steps,
-                f"Schreibe {source.name} · UR-Pose {pose_id}",
+                f"Schreibe {source.name} · Ansicht {pose_id}",
             )
 
     negative_count = 0
@@ -1789,7 +1766,7 @@ def generate_obb_dataset(
             negative_count += 1
             completed += 1
             if progress is not None:
-                progress(completed, total_steps, f"Übernehme Leerbild · UR-Pose {pose_id}")
+                progress(completed, total_steps, f"Übernehme Leerbild · Ansicht {pose_id}")
 
     for class_id, source, _, grouped in source_data:
         class_consensuses: dict[int | tuple[int, int], PoseConsensus] = {}
@@ -1798,6 +1775,7 @@ def generate_obb_dataset(
         handled_track_poses: set[int] = set()
         for view_id in sorted(grouped):
             pose_id, station_id = view_id
+            view_name = "fixed" if pose_id == 0 else f"ur_{pose_id}"
             consensus = all_consensuses[(class_id, pose_id, station_id)]
             if track_summaries[(class_id, pose_id)].active:
                 if pose_id in handled_track_poses:
@@ -1823,7 +1801,7 @@ def generate_obb_dataset(
                 _make_review_sheet(
                     representative_consensus,
                     pose_pairs,
-                    review / f"{prefix}_ur_{pose_id}_track_obb.jpg",
+                    review / f"{prefix}_{view_name}_track_obb.jpg",
                     {
                         path: box
                         for (box_class_id, path), box in output_boxes.items()
@@ -1843,13 +1821,13 @@ def generate_obb_dataset(
                     255,
                 )
             cv2.imwrite(
-                str(review / f"{prefix}_ur_{pose_id}_belt_{station_id}_consensus_mask.png"),
+                str(review / f"{prefix}_{view_name}_belt_{station_id}_consensus_mask.png"),
                 consensus_mask,
             )
             _make_review_sheet(
                 consensus,
                 grouped[view_id],
-                review / f"{prefix}_ur_{pose_id}_belt_{station_id}_obb.jpg",
+                review / f"{prefix}_{view_name}_belt_{station_id}_obb.jpg",
                 {
                     path: box
                     for (box_class_id, path), box in output_boxes.items()

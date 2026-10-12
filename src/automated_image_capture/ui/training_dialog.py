@@ -119,9 +119,10 @@ class TrainingDialog(QDialog):
         self._process_buffer = ""
         self._build_ui(paths)
         self._set_busy(False)
-        if self._dataset_directory is not None and (
-            self._dataset_directory / "data.yaml"
-        ).is_file():
+        if (
+            self._dataset_directory is not None
+            and (self._dataset_directory / "data.yaml").is_file()
+        ):
             self.dataset_status.setText(f"Vorhandener Datensatz: {self._dataset_directory}")
             self.train_button.setEnabled(True)
             self.open_dataset_button.setEnabled(True)
@@ -167,7 +168,7 @@ class TrainingDialog(QDialog):
                 "Qualität",
                 "Klasse",
                 "Split",
-                "UR-Winkel/Pose",
+                "Ansicht",
                 "Band Ist",
                 "Station/Fahrt",
                 "Panel 1",
@@ -326,9 +327,7 @@ class TrainingDialog(QDialog):
         if mode == "Nur REVIEW":
             records = [record for record in records if record.quality == "REVIEW"]
         elif mode == "Nur interpoliert":
-            records = [
-                record for record in records if "interpoliert" in record.quality_reason
-            ]
+            records = [record for record in records if "interpoliert" in record.quality_reason]
         elif mode == "Ausgeschlossen":
             records = [record for record in records if record.record_id in self._excluded_ids]
         if mode == "Auffällige zuerst":
@@ -372,7 +371,9 @@ class TrainingDialog(QDialog):
             include.setData(Qt.ItemDataRole.UserRole, record.record_id)
             self.table.setItem(row, 0, include)
             robot_value = (
-                f"{record.pose_id / 10.0:.1f}°"
+                "Fest"
+                if record.robot_mode == "fixed"
+                else f"{record.pose_id / 10.0:.1f}°"
                 if record.robot_mode == "angle"
                 else str(record.pose_id)
             )
@@ -439,7 +440,9 @@ class TrainingDialog(QDialog):
         )
         iou = "–" if record.consensus_iou is None else f"{record.consensus_iou:.3f}"
         robot_value = (
-            f"Winkel {record.pose_id / 10.0:.1f}°"
+            "Fest"
+            if record.robot_mode == "fixed"
+            else f"Winkel {record.pose_id / 10.0:.1f}°"
             if record.robot_mode == "angle"
             else f"Pose {record.pose_id}"
         )
@@ -460,18 +463,10 @@ class TrainingDialog(QDialog):
             if record.track_correction_applied
             else "direkte OBB"
         )
-        reason = (
-            ""
-            if not record.quality_reason
-            else f"\nPrüfgrund: {record.quality_reason}"
-        )
-        station = (
-            "–"
-            if record.conveyor_station_id is None
-            else str(record.conveyor_station_id)
-        )
+        reason = "" if not record.quality_reason else f"\nPrüfgrund: {record.quality_reason}"
+        station = "–" if record.conveyor_station_id is None else str(record.conveyor_station_id)
         self.preview_details.setText(
-            f"{record.class_name} · Split {record.split} · UR {robot_value} · "
+            f"{record.class_name} · Split {record.split} · Ansicht {robot_value} · "
             f"P1/P2 {record.panel_1}/{record.panel_2} · Konsens-IoU {iou}\n"
             f"Förderband: Ist {measured_position}, Soll {nominal_position}, "
             f"Station {station} "
@@ -492,9 +487,7 @@ class TrainingDialog(QDialog):
 
     def _update_review_summary(self) -> None:
         flagged = sum(record.quality == "REVIEW" for record in self._records)
-        interpolated = sum(
-            "interpoliert" in record.quality_reason for record in self._records
-        )
+        interpolated = sum("interpoliert" in record.quality_reason for record in self._records)
         positioned = sum(record.conveyor_track_used for record in self._records)
         split_counts = {
             split: sum(record.split == split for record in self._records)
@@ -654,9 +647,7 @@ class TrainingDialog(QDialog):
                 f"GPU: {', '.join(str(value) for value in devices)}"
             )
         elif kind == "evaluation_progress":
-            self.status.setText(
-                f"Leerbilder auswerten: {event.get('done')}/{event.get('total')}"
-            )
+            self.status.setText(f"Leerbilder auswerten: {event.get('done')}/{event.get('total')}")
         elif kind == "cache_progress":
             done = int(event.get("done", 0))
             total = int(event.get("total", 1))
@@ -680,8 +671,7 @@ class TrainingDialog(QDialog):
             if map50 is not None and map50_95 is not None:
                 metrics_text = f" · Test mAP50 {float(map50):.3f}, mAP50–95 {float(map50_95):.3f}"
             self.status.setText(
-                f"Training und Test abgeschlossen{metrics_text} · "
-                f"Leerbild-Fehlalarme {rate:.1f} %"
+                f"Training und Test abgeschlossen{metrics_text} · Leerbild-Fehlalarme {rate:.1f} %"
             )
         elif kind == "error":
             self.status.setText(f"Trainingsfehler: {event.get('message')}")
@@ -712,9 +702,11 @@ class TrainingDialog(QDialog):
             self._terminate_training_process(force=False)
             QTimer.singleShot(
                 5000,
-                lambda: self._terminate_training_process(force=True)
-                if process.state() != QProcess.ProcessState.NotRunning
-                else None,
+                lambda: (
+                    self._terminate_training_process(force=True)
+                    if process.state() != QProcess.ProcessState.NotRunning
+                    else None
+                ),
             )
 
     def _terminate_training_process(self, force: bool) -> None:

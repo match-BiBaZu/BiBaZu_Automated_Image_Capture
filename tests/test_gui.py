@@ -14,7 +14,6 @@ from automated_image_capture.models import (
     ConnectionState,
     ConveyorStatus,
     LightStatus,
-    RobotStatus,
 )
 from automated_image_capture.settings import SettingsStore
 from automated_image_capture.ui.main_window import MainWindow
@@ -45,16 +44,6 @@ def test_dashboard_renders_status_without_hardware(qtbot, tmp_path) -> None:
             preview_fps=15.0,
         )
     )
-    window._robot_status(
-        RobotStatus(
-            rtde_connected=True,
-            dashboard_connected=True,
-            robot_mode="RUNNING",
-            safety_mode="NORMAL",
-            remote_control="true",
-            speed_scaling=0.5,
-        )
-    )
     window._light_status(
         LightStatus(
             name="RGB660",
@@ -76,12 +65,13 @@ def test_dashboard_renders_status_without_hardware(qtbot, tmp_path) -> None:
 
     assert "TestCam" in window.camera_card.details.text()
     assert "30.0 / 25.0 / 15.0 FPS" in window.camera_card.details.text()
-    assert "RUNNING" in window.robot_card.details.text()
     assert "35 %" in window.light_card.details.text()
     assert "70 %" in window.light_2_card.details.text()
     assert window.config.camera_serial == "42"
     assert window.config.light_address == "AA:BB"
     assert window.config.light_2_address == "CC:DD"
+    assert not hasattr(window, "robot")
+    assert not hasattr(window, "robot_card")
 
 
 def test_dashboard_exposes_storage_cleanup_dialog(qtbot, tmp_path) -> None:
@@ -144,7 +134,6 @@ def test_device_failures_do_not_change_other_cards(qtbot, tmp_path) -> None:
     window.camera_card.set_state(ConnectionState.ERROR)
 
     assert window.camera_card.state is ConnectionState.ERROR
-    assert window.robot_card.state is ConnectionState.DISCONNECTED
     assert window.light_card.state is ConnectionState.DISCONNECTED
     assert window.light_2_card.state is ConnectionState.DISCONNECTED
 
@@ -174,9 +163,7 @@ def test_live_inference_result_updates_preview_and_status(qtbot, tmp_path) -> No
 
 def test_resume_button_is_only_enabled_for_interrupted_sequence(qtbot, tmp_path) -> None:
     window = make_window(qtbot, tmp_path)
-    window.acquisition_card.set_preflight(
-        (PreflightCheck("ready", "Test", True, "bereit"),)
-    )
+    window.acquisition_card.set_preflight((PreflightCheck("ready", "Test", True, "bereit"),))
 
     assert not window.acquisition_card.resume_button.isEnabled()
     window.acquisition_card.set_resume_available(True)
@@ -236,7 +223,6 @@ def test_acquisition_dialog_configures_continuous_angles_and_conveyor(qtbot, tmp
     dialog = AcquisitionDialog(AcquisitionSettings(output_directory=Path(tmp_path)))
     qtbot.addWidget(dialog)
 
-    dialog.robot_control_mode.setCurrentIndex(dialog.robot_control_mode.findData("angle"))
     dialog.conveyor_enabled.setChecked(True)
     dialog.conveyor_motion_mode.setCurrentIndex(
         dialog.conveyor_motion_mode.findData("synchronized")
@@ -245,14 +231,10 @@ def test_acquisition_dialog_configures_continuous_angles_and_conveyor(qtbot, tmp
     dialog.conveyor_step.setValue(10.0)
     config = dialog._current_config().validated()
 
-    assert config.robot_control_mode == "angle"
-    assert config.angle_step_deg == 0.5
     assert config.conveyor_enabled
     assert config.conveyor_motion_mode == "synchronized"
     assert config.conveyor_max_offset_mm == 50.0
     assert config.conveyor_step_mm == 10.0
-    assert dialog.angle_row.isVisibleTo(dialog)
-    assert not dialog.pose_row.isVisibleTo(dialog)
     assert dialog.ramp_group.isVisibleTo(dialog)
     assert not dialog.conveyor_step.isEnabled()
     assert "pro Bandlauf" in dialog.estimate.text()
@@ -299,74 +281,3 @@ def test_manual_conveyor_jog_starts_without_confirmation(qtbot, tmp_path, monkey
     window._jog_conveyor("left", 37.5)
 
     assert requests == [("left", 37.5, 10.0)]
-
-
-def test_robot_pose_requires_running_program_and_one_time_consent(qtbot, tmp_path) -> None:
-    window = make_window(qtbot, tmp_path)
-    spy = QSignalSpy(window.robot_card.pose_requested)
-
-    window._robot_status(
-        RobotStatus(
-            rtde_connected=True,
-            dashboard_connected=True,
-            command_channel_connected=True,
-            robot_mode="RUNNING",
-            safety_mode="NORMAL",
-            program_state="PLAYING BiBaZu.urp",
-            loaded_program="/programs/BiBaZu.urp",
-            command_state_code=1,
-            command_state="Bereit",
-        )
-    )
-
-    assert not window.robot_card.move_button.isEnabled()
-    window.robot_card.motion_consent.setChecked(True)
-    assert window.robot_card.move_button.isEnabled()
-
-    window.robot_card.pose_selector.setCurrentIndex(3)
-    window.robot_card.move_button.click()
-
-    assert len(spy) == 1
-    assert spy[0][0] == 180
-    assert not window.robot_card.motion_consent.isChecked()
-    assert not window.robot_card.move_button.isEnabled()
-
-
-def test_robot_pose_is_disabled_while_command_is_pending(qtbot, tmp_path) -> None:
-    window = make_window(qtbot, tmp_path)
-    window._robot_status(
-        RobotStatus(
-            rtde_connected=True,
-            dashboard_connected=True,
-            command_channel_connected=True,
-            robot_mode="RUNNING",
-            safety_mode="NORMAL",
-            program_state="PLAYING BiBaZu.urp",
-            loaded_program="/programs/BiBaZu.urp",
-            command_state_code=2,
-            command_state="Fährt",
-            command_pending=True,
-        )
-    )
-
-    window.robot_card.motion_consent.setChecked(True)
-    assert not window.robot_card.move_button.isEnabled()
-
-
-def test_fixed_pose_button_is_disabled_for_continuous_ur_program(qtbot, tmp_path) -> None:
-    window = make_window(qtbot, tmp_path)
-    window._robot_status(
-        RobotStatus(
-            rtde_connected=True,
-            dashboard_connected=True,
-            command_channel_connected=True,
-            robot_mode="RUNNING",
-            safety_mode="NORMAL",
-            program_state="PLAYING",
-            loaded_program="/programs/BiBaZu_Continuous.urp",
-            command_state_code=1,
-        )
-    )
-    window.robot_card.motion_consent.setChecked(True)
-
-    assert not window.robot_card.move_button.isEnabled()

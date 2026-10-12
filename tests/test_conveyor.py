@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import pytest
+from PyQt6.QtTest import QSignalSpy
 
-from automated_image_capture.acquisition import angle_values, conveyor_positions
+from automated_image_capture.acquisition import conveyor_positions
 from automated_image_capture.hardware.conveyor import (
     UINT32_MODULUS,
     ConveyorAdapter,
@@ -10,16 +11,13 @@ from automated_image_capture.hardware.conveyor import (
     effective_direction_sign,
     expected_move_internal_position,
     full_steps_for_offset,
+    move_duration_seconds,
     move_position_matches,
     signed_u32_delta,
     speed_in_full_steps,
 )
 from automated_image_capture.models import ConnectionState, ConveyorMove, ConveyorStatus
 from automated_image_capture.settings import AppSettings
-
-
-def test_default_angle_range_has_twelve_targets() -> None:
-    assert angle_values(15.5, 21.0, 0.5) == tuple(range(155, 211, 5))
 
 
 def test_conveyor_path_records_outward_and_return_passes() -> None:
@@ -95,12 +93,27 @@ def test_expected_move_endpoint_handles_reverse_and_u32_wrap() -> None:
 
 def test_conveyor_speed_is_clamped_to_plc_range() -> None:
     assert speed_in_full_steps(10.0, 0.5) == 20.0
-    assert speed_in_full_steps(1000.0, 0.5) == 500.0
+    assert speed_in_full_steps(200.0, 0.0245436926) == pytest.approx(8148.733086)
+    with pytest.raises(ValueError, match="200 mm/s"):
+        speed_in_full_steps(201.0, 0.0245436926)
 
 
 class FakePlc:
     def __init__(self) -> None:
         self.writes: list[dict[str, object]] = []
+        self.values = {
+            "MAIN.ConveyorServoVelocityOnly": True,
+            "MAIN.ConveyorCaptureInterfaceVersion": 1,
+            "MAIN.StepperPosBusy": False,
+            "MAIN.StepperPosError": False,
+            "MAIN.ConveyorServoFaultCode": 0,
+            "MAIN.ConveyorServoState": 0,
+            "MAIN.ConveyorServo1TargetVelocity": 0,
+            "MAIN.ConveyorServo2TargetVelocity": 0,
+        }
+
+    def read_list_by_name(self, names, *, cache_symbol_info: bool):
+        return {name: self.values[name] for name in names}
 
     def write_list_by_name(self, values, *, cache_symbol_info: bool):
         assert cache_symbol_info
@@ -115,20 +128,20 @@ def test_worker_enables_drive_before_sending_relative_move() -> None:
 
     worker._handle_command(plc, "move", move, object())
 
-    assert plc.writes == [
-        {
-            "MAIN.GuiConveyorEnabled": False,
-            "MAIN.GuiConveyorCalibrationMode": True,
-        }
-    ]
+    assert plc.writes[-1] == {
+        "MAIN.GuiConveyorEnabled": False,
+        "MAIN.GuiConveyorCalibrationMode": True,
+    }
+    assert any(v.get("MAIN.ConveyorServoMotorCount") == 2 for v in plc.writes)
+    assert any(v.get("MAIN.GuiConveyorReset") for v in plc.writes)
     assert not worker._move_command_sent
 
     worker._issue_move_command(plc, object())
 
-    assert plc.writes[1] == {
-            "MAIN.GuiCalibrationJogSteps": 30,
-            "MAIN.GuiCalibrationJogSpeedFullStepsPerSec": 30.34,
-            "MAIN.GuiCalibrationMoveRight": True,
+    assert plc.writes[-1] == {
+        "MAIN.GuiCalibrationJogSteps": 30,
+        "MAIN.GuiCalibrationJogSpeedFullStepsPerSec": 30.34,
+        "MAIN.GuiCalibrationMoveRight": True,
     }
     assert worker._move_command_sent
 
@@ -277,5 +290,44 @@ def test_position_match_tolerance_can_cover_small_drive_residual() -> None:
     )
     adapter._decorate_status()
 
-    assert not adapter.position_matches(150.0, tolerance_full_steps=1)
+    assert adapter.position_matches(150.0, tolerance_full_steps=1)
     assert adapter.position_matches(150.0, tolerance_full_steps=3)
+    adapter._status.logical_offset_mm = 151.5
+    assert not adapter.position_matches(150.0)
+
+
+def test_old_plc_interface_cannot_enable_capture_motors() -> None:
+    plc = FakePlc()
+    plc.values["MAIN.ConveyorCaptureInterfaceVersion"] = 0
+    worker = ConveyorWorker(AppSettings())
+    failures = QSignalSpy(worker.move_failed)
+    worker._handle_command(plc, "move", ConveyorMove(7, 10, 10, 30, 30, 10, 30, "right"), None)
+
+    assert len(failures) == 1
+    assert not any(v.get("MAIN.GuiConveyorCalibrationMode") for v in plc.writes)
+    assert worker._requested_move is None
+
+
+def test_stop_during_tandem_preparation_prevents_later_enable() -> None:
+    plc = FakePlc()
+    worker = ConveyorWorker(AppSettings())
+    original_write = plc.write_list_by_name
+
+    def stop_when_configured(values, *, cache_symbol_info):
+        result = original_write(values, cache_symbol_info=cache_symbol_info)
+        if "MAIN.ConveyorServoMotorCount" in values:
+            worker.enqueue_stop()
+        return result
+
+    plc.write_list_by_name = stop_when_configured
+    failures = QSignalSpy(worker.move_failed)
+    worker._handle_command(plc, "move", ConveyorMove(7, 10, 10, 30, 30, 10, 30, "right"), None)
+
+    assert len(failures) == 1
+    assert not any(v.get("MAIN.GuiConveyorCalibrationMode") for v in plc.writes)
+    assert not any(v.get("MAIN.GuiCalibrationMoveRight") for v in plc.writes)
+
+
+def test_finite_jog_duration_includes_acceleration_and_braking() -> None:
+    assert move_duration_seconds(100, 10, 3) == pytest.approx(11)
+    assert move_duration_seconds(10, 20, 3) == pytest.approx(2)

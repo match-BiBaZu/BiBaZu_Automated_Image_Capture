@@ -7,7 +7,7 @@ from pathlib import Path
 SUPPORTED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 
 CAPTURE_NAME = re.compile(
-    r"^img_(?P<index>\d+)_(?:ur(?P<pose>\d+)|ura-(?P<angle>\d+))_"
+    r"^img_(?P<index>\d+)_(?:ur(?P<pose>\d+)|ura-(?P<angle>\d+)|(?P<fixed>fixed))_"
     r"(?:belt-(?P<belt>\d+)_pos-(?P<position>\d+)_(?P<direction>out|back)_)?"
     r"(?:ramp-(?P<ramp>\d+)_)?"
     r"p1-(?P<p1>\d+)_p2-(?P<p2>\d+)_"

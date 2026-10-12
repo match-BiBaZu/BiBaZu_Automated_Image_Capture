@@ -8,6 +8,12 @@ import numpy as np
 import pytest
 
 import automated_image_capture.labeling as labeling_module
+from automated_image_capture.dataset import (
+    DatasetBuildConfig,
+    build_curated_dataset,
+    collect_dataset_records,
+    verify_curated_dataset,
+)
 from automated_image_capture.labeling import (
     CaptureKey,
     CaptureRecord,
@@ -16,8 +22,8 @@ from automated_image_capture.labeling import (
     LabelingError,
     LabelSource,
     MatchedPair,
-    _labeling_worker_count,
     _box_from_shadow_trimmed_mask,
+    _labeling_worker_count,
     _parallel_map_ordered,
     _trim_thin_mask_protrusions,
     assess_obb_visibility,
@@ -107,9 +113,9 @@ def _make_continuous_capture_pair(tmp_path: Path) -> tuple[Path, Path]:
         image = base.copy()
         cv2.fillConvexPoly(
             image,
-            np.rint(
-                cv2.boxPoints(((65.0 + index * 35.0, 120.0), (70.0, 38.0), 12.0))
-            ).astype(np.int32),
+            np.rint(cv2.boxPoints(((65.0 + index * 35.0, 120.0), (70.0, 38.0), 12.0))).astype(
+                np.int32
+            ),
             20,
         )
         assert cv2.imwrite(str(empty_path), base)
@@ -169,8 +175,7 @@ def test_continuous_angle_and_belt_station_are_part_of_capture_key(tmp_path: Pat
 
 def test_scan_capture_reads_measured_conveyor_position_from_yaml(tmp_path: Path) -> None:
     image_path = (
-        tmp_path / "img_000001_ura-0155_belt-001_pos-0100_out_ramp-001_"
-        "p1-020_p2-030_auto.png"
+        tmp_path / "img_000001_ura-0155_belt-001_pos-0100_out_ramp-001_p1-020_p2-030_auto.png"
     )
     assert cv2.imwrite(str(image_path), np.zeros((20, 30), dtype=np.uint8))
     image_path.with_suffix(".yaml").write_text(
@@ -242,9 +247,9 @@ def test_measured_conveyor_track_interpolates_missing_segmentations(tmp_path: Pa
         pair = MatchedPair(record, record)
         raw_box = None
         if index not in missing:
-            raw_box = cv2.boxPoints(
-                ((70.0 + index * 12.0, 120.0), (70.0, 35.0), 12.0)
-            ).astype(np.float32)
+            raw_box = cv2.boxPoints(((70.0 + index * 12.0, 120.0), (70.0, 35.0), 12.0)).astype(
+                np.float32
+            )
         entries.append(({"quality": "PASS", "quality_reason": ""}, pair, raw_box))
 
     boxes, summary = stabilize_boxes_by_conveyor_position(entries)
@@ -337,18 +342,14 @@ def test_measured_conveyor_track_allows_nonlinear_progress_on_straight_image_lin
             conveyor_direction="out",
         )
         record = CaptureRecord(path, key, index, position, position)
-        raw_box = cv2.boxPoints(((center_x, center_y), (72.0, 38.0), 14.0)).astype(
-            np.float32
-        )
+        raw_box = cv2.boxPoints(((center_x, center_y), (72.0, 38.0), 14.0)).astype(np.float32)
         entries.append(
             ({"quality": "PASS", "quality_reason": ""}, MatchedPair(record, record), raw_box)
         )
 
     boxes, summary = stabilize_boxes_by_conveyor_position(entries)
 
-    predicted = np.asarray(
-        [boxes[pair.foreground.path].mean(axis=0) for _, pair, _ in entries]
-    )
+    predicted = np.asarray([boxes[pair.foreground.path].mean(axis=0) for _, pair, _ in entries])
     assert summary.active
     assert np.max(np.linalg.norm(predicted - np.asarray(expected), axis=1)) < 3.0
     direction = predicted[-1] - predicted[0]
@@ -496,6 +497,46 @@ def test_generate_yolo_obb_dataset_with_negative_images(tmp_path: Path) -> None:
     assert "train: images/train" in (output / "data.yaml").read_text(encoding="utf-8")
     assert (output / "label_report.csv").is_file()
     assert len(list((output / "review").glob("class_*_ur_*_obb.jpg"))) == 2
+
+
+def test_fixed_capture_runs_through_labeling_and_training_dataset(tmp_path: Path) -> None:
+    foreground, background = _make_continuous_capture_pair(tmp_path)
+    for directory in (foreground, background):
+        for path in directory.iterdir():
+            path.rename(path.with_name(path.name.replace("ura-0155", "fixed")))
+    records = scan_capture(foreground)
+    assert len(records) == 8
+    assert all(key.robot_mode == "fixed" and key.pose_id == 0 for key in records)
+    labeled = tmp_path / "fixed_obb"
+    result = generate_obb_dataset(
+        LabelingConfig(
+            (LabelSource("Part", foreground), LabelSource("Empty", background, is_empty=True)),
+            labeled,
+            minimum_difference=20,
+        )
+    )
+    assert result.positive_images == 8
+    assert result.negative_images == 8
+    config = DatasetBuildConfig(labeled, tmp_path / "training")
+    training_records = collect_dataset_records(config)
+    assert {record.split for record in training_records} == {"train", "val", "test"}
+    for pair in {(record.panel_1, record.panel_2) for record in training_records}:
+        assert (
+            len(
+                {
+                    record.split
+                    for record in training_records
+                    if (record.panel_1, record.panel_2) == pair
+                }
+            )
+            == 1
+        )
+    assert [(r.record_id, r.split) for r in training_records] == [
+        (r.record_id, r.split) for r in collect_dataset_records(config)
+    ]
+    built = build_curated_dataset(config)
+    assert built.included_images == 16
+    assert verify_curated_dataset(built.dataset_directory).valid
 
 
 def test_continuous_dataset_writes_compact_track_review(tmp_path: Path) -> None:

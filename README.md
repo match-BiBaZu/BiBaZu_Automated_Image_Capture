@@ -4,20 +4,15 @@ Eine ausführliche fachliche und technische Projektübergabe einschließlich PC-
 Hardwarevoraussetzungen, Datenformaten und offenen Punkten steht in
 [`PROJECT_HANDOFF.md`](PROJECT_HANDOFF.md).
 
-PyQt6-Hardware-Dashboard als erster Baustein einer automatisierten Aufnahme von
-YOLO-Trainingsbildern. Die Anwendung verbindet:
+PyQt6-Dashboard für automatisierte YOLO-Trainingsbilder am Zweimotoren-Förderband.
+Die Rutsche ist fest auf einem Gestell montiert; ihre Neigung wird nicht verstellt.
+Die Anwendung verbindet die Baumer-GigE-Kamera, das gemeinsame TwinCAT-Förderband
+und zwei Neewer RGB660 Pro II über Bluetooth LE.
 
-- eine Baumer GigE-Vision-Kamera über den installierten GenTL-Producer,
-- einen Universal Robots UR16e über einen Statusmonitor und einen begrenzten
-  RTDE-Pose-Handshake,
-- zwei Neewer RGB660 Pro II über Bluetooth Low Energy.
-
-Die aktuelle Version zeigt das Kamera-Livebild und Gerätestatus an und erlaubt die
-unabhängige manuelle Steuerung beider Lichtpanels. Sie kann außerdem eine von sieben fest im
-UR-Programm freigegebenen Ansichten anfordern. Automatische Aufnahmesequenzen mit getrennten
-Panelhelligkeiten, optionaler Belichtungsvariation und Bild-/YAML-Speicherung sind enthalten.
-Konsensbasierte OBB-Annotation, kuratierte Zwei-Klassen-Datensätze und ein reproduzierbares
-YOLO26n-OBB-Training sind ebenfalls enthalten.
+Livebild, getrennte Lichtsteuerung, Raster-/Rampenaufnahme, Belichtungsvariation,
+PNG-/YAML-Speicherung, Fortsetzen, OBB-Annotation, Kuratierung, YOLO-Training,
+Liveerkennung und Speicherbereinigung sind enthalten. Die Anwendung benötigt
+keinen Roboter und kein Roboterprogramm.
 
 ## Voraussetzungen
 
@@ -26,7 +21,6 @@ YOLO26n-OBB-Training sind ebenfalls enthalten.
 - Baumer Camera Explorer beziehungsweise der Producer
   `C:\Program Files\Baumer Camera Explorer\bgapi2_gige.cti`
 - Kamera-Netzwerk `169.254.0.0/16`, hier Kamera `169.254.117.70`
-- UR-Netzwerk `10.10.10.0/24`, hier Roboter `10.10.10.10`
 - Bluetooth-LE-Adapter und bis zu zwei eingeschaltete RGB660 Pro II
 
 Der Baumer Camera Explorer muss geschlossen sein, da eine Kamera gewöhnlich nicht von zwei
@@ -56,54 +50,50 @@ Beim ersten Start werden keine Geräte automatisch verbunden und keine Lichtwert
 IPs, CTI-Pfad und Wiederverbindung lassen sich über **Einstellungen** ändern. Die erfolgreiche
 Kamera- und Lichtauswahl wird über `QSettings` im Windows-Benutzerprofil gespeichert.
 
-## Bedienung
+## Bedienung und Zweimotoren-Förderband
 
-1. Camera Explorer und Neewer-App schließen.
-2. Kamera, Roboter und beide Lichter einschalten.
-3. **Alle verbinden** oder die einzelnen Schaltflächen verwenden.
-4. Das Kamerabild sowie Modell, Seriennummer, Pixelformat und Bildrate prüfen.
-   Die Belichtungszeit kann direkt in der Kamerakarte eingetragen und mit **Übernehmen**
-   gesetzt werden. Falls nötig, wird `ExposureAuto` dabei für diese Verbindung deaktiviert.
-   Beim Trennen werden Belichtungszeit und Automatikmodus vom Verbindungsaufbau
-   wiederhergestellt.
-5. Beim UR die RTDE-/Dashboard-Anzeigen und insbesondere den Safety Mode prüfen.
-6. Für einen Pose-Auftrag das vorbereitete `BiBaZu`-Programm manuell starten, eine Ansicht
-   auswählen und die einmalige Bewegungsfreigabe bestätigen.
-7. Die Lichter erst nach erfolgreicher Verbindung über Ein/Aus, Helligkeit, CCT oder HSI ändern.
+1. Camera Explorer und Neewer-App schließen; Kamera, SPS und beide Panels einschalten.
+2. **Alle verbinden** oder die einzelnen Gerätekarten verwenden.
+3. Livebild und Kamera-/Rohabruf-/Vorschau-FPS prüfen. Belichtung bleibt manuell einstellbar.
+4. In der Bandkarte kurze Testfahrten über **Links**/**Rechts** ausführen und die
+   Vorwärtsrichtung festlegen. Die echte Encoder-Rückmeldung muss sich ändern.
+5. Bauteil hinten platzieren und **Aktuelle Position = 0 mm** wählen.
+6. Beleuchtung einstellen oder eine automatische Serie konfigurieren.
 
-## Kontinuierlicher UR-Winkel und Förderband
+TwinCAT ADS verwendet SPS `192.168.10.23`, AMS-Net-ID `10.145.4.14.1.1` und
+PLC-Port 851. Die ADS-Runtime und beidseitige AMS-Route müssen eingerichtet sein.
+`PressureControlGUI` darf währenddessen nicht dasselbe Band steuern.
 
-Zusätzlich zu den festen Pose-IDs unterstützt die Aufnahme `BiBaZu_Continuous.urp`.
-Das am Handbediengerät eingelernte XYZ bleibt erhalten; variiert wird der Winkel von
-15,5 bis 21,0 Grad. Das fertige URP und seine Skriptdateien liegen unter `ur_program/`.
+Das vorhandene SPS-Projekt liegt in
+`BiBaZu_Big_Boi/CSVSaver/TwinCAT Projekt3 - Kopie/TwinCAT Projekt3.sln`.
+Motor 1 liegt an Device 3/Term 7, Motor 2 an Device 4/Term 10 (EL7201-0010).
+Beide verwenden CSV-Modus 9, dieselbe Fahrkurve, Richtung -1, Verhältnis 1:1,
+32:1-Getriebe und 50-mm-Rollen. Die nominelle Umrechnung beträgt
+`pi * 50 / (200 * 32) = 0,0245436926 mm` pro virtuellem Vollschritt.
+Der Adapter verwendet weiterhin die kompatiblen `MAIN.Stepper*`-Statusnamen;
+deren Position stammt jetzt von den Servo-Encodern.
 
-Das Förderband wird über TwinCAT ADS angesprochen. Vorgaben sind SPS `192.168.10.23`,
-AMS-Net-ID `10.145.4.14.1.1` und PLC-Port 851. Windows benötigt dafür die TwinCAT-ADS-
-Runtime, eine beidseitige AMS-Route und eine Netzwerkkonfiguration, welche die SPS erreicht.
-`PressureControlGUI` darf während der Aufnahme nicht gleichzeitig das Band steuern.
+**Für diesen Umbau muss der aktualisierte SPS-Quellstand kompiliert und geladen werden.**
+`MAIN.ConveyorCaptureInterfaceVersion = 1` kennzeichnet die angepassten endlichen
+Aufnahmefahrten: maximal 250000 virtuelle Vollschritte und der gemeinsame
+Geschwindigkeitsbereich bis 8148,733086 Schritte/s bzw. 200 mm/s. Ältere SPS-Stände
+begrenzen diese Fahrten noch auf 500 Schritte/s; die GUI akzeptiert sie nicht.
+Ein GUI-Start lädt oder aktiviert keine SPS-Konfiguration.
 
-Vor einer neuen Serie wird das Bauteil hinten platziert und in der Förderbandkarte
-**Aktuelle Position = 0 mm** gewählt. Für manuelle Testfahrten wird der Fahrweg in Millimetern
-eingetragen und anschließend **Links** oder **Rechts** gewählt. Eine zusätzliche Rückfrage wird
-nicht angezeigt. Nach kurzen Testfahrten wird Links oder Rechts als
-Vorwärtsrichtung gespeichert. `Term 19 → POS Status → Actual position` muss in TwinCAT
-mit `MAIN.StepperInternalPosition` verknüpft sein. Die GUI gibt den synchronisierten Modus erst
-frei, nachdem eine Testfahrt eine echte Änderung dieses Werts gezeigt hat.
+Erst ein angeforderter Fahrauftrag führt den bekannten gestoppten Konfigurationsablauf
+aus: Stop beider Antriebe prüfen, MotorCount=2 und die gemeinsamen Einstellungen
+setzen, gestoppt zurücksetzen und den Fahrmodus aktivieren. Die
+Motorbeschleunigung ist im Aufnahmedialog einstellbar (Standard 50 rpm/s).
+Verbindungsaufbau allein löst keine Fahrt aus. Stop während der Vorbereitung
+verhindert den anschließenden Start.
 
-Der Modus **Diskrete Stationen** verwendet weiterhin die Reihenfolge UR-Ziel →
-Förderbandstation → Belichtung → vollständige Lichtvariation. Standardmäßig fährt das
-Band `0, 10, 20, 30, 40, 50, 40, 30, 20, 10, 0 mm`; Hin- und Rückweg sind getrennte
-Stationen. Im Modus **Kontinuierliche synchronisierte Fahrt** fährt das Band pro UR-Ziel und
-Belichtung ohne Zwischenstopps `0 → Maximum → 0 mm`. Kamera und beide Panels laufen
-währenddessen weiter. Erst nach der bestätigten Rückkehr zu 0 mm wird der UR-Winkel geändert.
-Eine SPS-Fertigmeldung wird dabei erst akzeptiert, wenn auch `StepperInternalPosition` den
-berechneten Endpunkt erreicht hat. Eine bis zu zwei Sekunden verzögerte Positionsrückmeldung
-wird mit 10 Hz nachgeführt, ohne die enge Endpunkttoleranz aufzuweichen.
-
-Beim Stoppen sendet die Anwendung einen Förderband-Stop und gibt den SPS-Positioniermodus
-frei. Eine UR-Fahrt wird weiterhin nicht extern abgebrochen. Beim Fortsetzen wird die interne
-SPS-Position gegen den gespeicherten Nullpunkt geprüft. Abweichungen erfordern eine separat
-bestätigte Korrekturfahrt.
+Die SPS fährt ein Geschwindigkeitsprofil ohne Positionskorrektur. Die Anwendung
+akzeptiert eine Restabweichung bis 1 mm (mindestens die bisherige
+Vollschritt-Toleranz) und speichert die tatsächliche Position. Größere Abweichungen
+führen nach der Rückmeldefrist zum Abbruch, ohne automatische Nachstellfahrt.
+Die nächste Station wird aus der gemessenen Position und dem unveränderten
+Nullpunkt berechnet. Vor dem Fortsetzen wird die Position erneut geprüft;
+eine nötige Korrekturfahrt bleibt eine getrennt bestätigte Bedienaktion.
 
 ## Kamera-Bildrate
 
@@ -148,55 +138,56 @@ deutlich länger als die folgenden Frames.
 
 ## Automatische Aufnahme
 
-1. Passend zum UR-Modus `BiBaZu_GUI.urp` oder `BiBaZu_Continuous.urp` am Teach Pendant
-   laden und manuell starten.
-2. Kamera, UR, beide Panels und bei aktivierter Positionsvariation das Förderband verbinden.
-3. Unter **Aufnahme konfigurieren** Speicherort, UR-Modus und den Lichtmodus festlegen:
-   **Exaktes Raster** verwendet feste Helligkeitsschritte; **Schnelle Rampe** nimmt während
-   zeitbasierter Dreieckskurven beider Panels kontinuierlich Bilder auf.
-4. Für eine Bandserie Vorwärtsrichtung bestätigen, das Bauteil hinten platzieren und die
-   aktuelle Position ausdrücklich als logischen Nullpunkt übernehmen. Für den
-   synchronisierten Modus zuvor per manueller Testfahrt die Positionsrückmeldung prüfen.
-5. Optional die Belichtungsvariation aktivieren, wenn die verbundene Kamera eine manuell
-   beschreibbare `ExposureTime` meldet.
-6. **Aufnahme starten** wählen und die Freigabe des Arbeitsraums bestätigen.
+1. Kamera und beide Panels verbinden; für Bandserien zusätzlich das Förderband.
+2. Unter **Aufnahme konfigurieren** Speicherort, Lichtmodus und optional
+   Belichtungsvariation einstellen. Die Rutsche hat eine feste Ansicht.
+3. Für Bandserien Vorwärtsrichtung und Nullpunkt festlegen. Synchronisierte
+   Serien benötigen eine durch Testfahrt geprüfte Positionsrückmeldung.
+4. **Aufnahme starten** wählen und die Freigabe des Arbeitsraums bestätigen.
 
-Die allgemeine Reihenfolge ist UR-Ziel → Bandstation → Belichtung → Lichtvariation. Im
-Rastermodus läuft Panel 1 je Panel-2-Wert vollständig durch. Im Rampenmodus wird pro
-Belichtung eine vollständige Rampe aufgenommen. Das Standardprofil
-speichert 60 Bilder in 10 Sekunden bei Panelperioden von 2,4 und 10 Sekunden. Pro Panel läuft
-höchstens ein BLE-Befehl gleichzeitig; veraltete Zwischenziele werden übersprungen. Die
-Dateinamen enthalten `ramp-NNN`, und die YAML-Dateien dokumentieren Sollzeit, tatsächliche
-Aufnahmeabweichung sowie den letzten bestätigten Panelbefehl.
+**Diskrete Stationen:** Förderbandstation → Belichtung → vollständige Lichtvariation.
+Standardweg: `0, 10, 20, 30, 40, 50, 40, 30, 20, 10, 0 mm`.
+Hin- und Rückweg werden getrennt gespeichert. Ohne Positionsvariation wird die
+Licht-/Belichtungsreihe einmal an der festen Ansicht aufgenommen.
 
-Bei der **kontinuierlichen synchronisierten Fahrt** lautet die Reihenfolge UR-Ziel →
-Belichtung → kompletter Bandlauf mit gleichzeitiger Lichtvariation. Die Rundfahrtdauer wird
-aus Weg und Geschwindigkeit bestimmt. Im Rampenmodus werden die Lichtperioden proportional
-auf diese Dauer skaliert. Im diskreten Modus werden die Lichtpaare über die Fahrt verteilt;
-bei zu vielen Kombinationen wird die Bandgeschwindigkeit automatisch reduziert. Veraltete
-BLE-Zwischenziele werden nicht aufgestaut. Jede YAML-Datei enthält geplante und gemessene
-Bandposition, Richtung, Sollhelligkeiten, zuletzt bestätigte Panelwerte sowie Zeitabweichung.
-Jede Sitzung erhält einen eigenen Ordner `capture_YYYYMMDD_HHMMSS`. Zu jeder verlustfreien
-PNG-Datei wird eine gleichnamige YAML-Datei mit Kamera-, Roboter-, Licht- und Sequenzdaten
-gespeichert. Eine optionale Belichtungsvariation wird beim Abschluss oder Stoppen auf den Wert
-vom Kamera-Verbindungsaufbau zurückgesetzt.
+**Kontinuierliche synchronisierte Fahrt:** Pro Belichtung fährt das Band
+`0 → Maximum → 0 mm`, während Kamera und Panels weiterlaufen. Weg,
+Geschwindigkeit, Beschleunigungs- und Bremsrampen bestimmen Zeit und geplante Positionen.
+Bei 50 mm, 10 mm/s und 50 rpm/s beträgt die reine Rundfahrzeit nominal 14,889 s;
+bei 6 Bildern/s sind 90 Samples geplant. Vorbereitungs- und Umkehrpausen kommen hinzu.
+Viele Raster-Lichtpaare reduzieren die effektive Geschwindigkeit. Die YAMLs
+enthalten stets sowohl geplante als auch gemessene Bandposition und Zeitabweichung.
 
-**Aufnahme stoppen** verhindert weitere Aufträge und Bilder. Eine bereits begonnene Bewegung
-wird aus Sicherheitsgründen nicht durch einen externen Stop-Befehl unterbrochen.
+**Exaktes Raster** arbeitet feste Helligkeitsschritte ab. Panel 1 läuft je
+Panel-2-Wert vollständig durch. **Schnelle Rampe** nimmt während zeitbasierter
+Dreieckskurven beider Panels kontinuierlich Bilder auf. Ohne Bandfahrt bleibt
+das Standardprofil bei 60 Bildern in 10 Sekunden und Panelperioden 2,4/10 s.
+Bei synchroner Bandfahrt werden die Lichtperioden auf die Rundfahrzeit skaliert.
+Pro Panel läuft höchstens ein BLE-Befehl; überholte Zwischenziele werden übersprungen.
 
-Wird eine Sitzung durch einen Gerätefehler, **Aufnahme stoppen** oder das Beenden der GUI
-unterbrochen, wird **Aufnahme fortsetzen** aktiviert. Die Sitzung speichert ihren Fortschritt
-atomar in `capture_session.json` und kann daher auch nach einem GUI-Neustart wiederhergestellt
-werden. Vor dem Fortsetzen werden alle Hardwareverbindungen erneut geprüft und bereits
-vollständige PNG-/YAML-Paare übersprungen. Ein unvollständiges Dateipaar führt bewusst zu einer
-Fehlermeldung, damit keine vorhandene Aufnahme unbemerkt überschrieben wird. Der UR fährt beim
-Fortsetzen die nächste benötigte freigegebene Pose erneut über den normalen Handshake an.
+Jede Sitzung erhält `capture_YYYYMMDD_HHMMSS`. Neue Dateinamen verwenden
+`img_000001_fixed_…`; zu jedem verlustfreien PNG gehört eine gleichnamige YAML
+mit Kamera-, Licht-, Sequenz- und gegebenenfalls Banddaten. `chute.mounting: fixed`
+und `chute.inclination_adjustable: false` dokumentieren das Gestell. Ein
+Neigungswert wird nicht erfunden. Die Metadaten-/Checkpoint-Version ist 3.
+
+**Aufnahme stoppen** beendet neue Aufträge und sendet den gemeinsamen Band-Stop.
+Bei Abschluss/Stop wird eine variierte Belichtung auf den Verbindungswert zurückgesetzt.
+`capture_session.json` speichert den Fortschritt atomar. Fortsetzen funktioniert
+auch nach GUI-Neustart; vollständige PNG-/YAML-Paare werden übersprungen,
+unvollständige Paare werden nicht überschrieben.
+
+Alte Bildserien mit `ur…`/`ura-…` bleiben für Labeling, Training und Bereinigung
+lesbar. Alte unterbrochene UR-Aufnahmesitzungen werden ausdrücklich abgelehnt,
+weil ihre Winkelreihen und Bildindizes nicht zum festen Gestell passen.
+Gespeicherte UR-IP-/Winkel-Einstellungen werden ignoriert; Licht-, Kamera-,
+Belichtungs-, Band- und Speicherort-Einstellungen bleiben erhalten.
 
 ## Automatische OBB-Labels
 
 Bei synchronen Förderbandaufnahmen liest das Labeling zusätzlich
 `conveyor.measured_logical_offset_mm` aus jeder Bild-YAML. Die OBB-Mittelpunkte werden pro
-UR-Orientierung als gerade Bildbahn über der gemessenen Bandposition modelliert. Ein robuster
+Kameraansicht als gerade Bildbahn über der gemessenen Bandposition modelliert. Ein robuster
 Ankerfilter verwirft Schatten, Rutschenkanten sowie unplausibel große Boxen, bevor Größe und
 Orientierung bestimmt werden. Fehlerhafte Einzelsegmentierungen werden durch die Bahn
 stabilisiert und im `label_report.csv` weiterhin als `REVIEW` nachvollziehbar markiert.
@@ -211,7 +202,7 @@ schlecht gefüllten Rohboxen entfernt; dabei müssen mindestens 70 % der Maskenf
 bleiben. Kompakte Masken verwenden unverändert den bisherigen Pfad.
 
 Nach der einmaligen Segmentierung pausiert die GUI vor dem Export. Sie zeigt für jede Klasse
-und jeden UR-Winkel sechs über die gesamte Bandstrecke verteilte Beispiele: Grün bedeutet
+und jeden Kameraansicht sechs über die gesamte Bandstrecke verteilte Beispiele: Grün bedeutet
 `ANKER`, Orange bedeutet eine aus der Bahn berechnete Box. Erst **Anker übernehmen** schreibt
 noch nicht sofort den YOLO-Datensatz: Anschließend bewertet eine zweite Stufe globale
 Helligkeit, Clipping, Dynamikumfang und den lokalen Kontrast in der erwarteten OBB. Verdächtige
@@ -222,7 +213,7 @@ vorausgewählt; kontrastierte dunkle Grenzfälle bleiben eine bewusste Nutzerent
 Ausgeschlossene Bilder stehen mit Sichtbarkeitsscore und Begründung weiterhin im
 `label_report.csv`, werden aber weder als Trainingsbild noch als Label geschrieben.
 
-Für synchronisierte Bandserien enthält `review/` je Klasse und UR-Winkel ein kompaktes Blatt
+Für synchronisierte Bandserien enthält `review/` je Klasse und Kameraansicht ein kompaktes Blatt
 mit sechs über die Strecke verteilten Bildern sowie eine Klassenübersicht. Dadurch werden bei
 hochauflösenden Serien nicht mehr pro einzelner Bandposition redundante Vollmasken und
 2×3-Blätter erzeugt. Klassische Rasterserien behalten ihre bisherigen Konsensmasken.
@@ -240,14 +231,14 @@ identischen Leerbildserie ein gemeinsamer YOLO-OBB-Datensatz erzeugen. Die Quell
 mit `Pose 1`, `Pose 2` und `Leere Rutsche`; weitere Posen lassen sich hinzufügen oder wieder
 entfernen. Jede Pose erhält anhand ihrer Listenposition eine eigene Klassen-ID und in jeder
 Zeile kann der zugehörige Aufnahmeordner gewählt werden. Das Tool paart die Aufnahmen anhand
-von UR-Pose, beiden Panelhelligkeiten und Belichtung. Vor der Differenzbildung wird jedes
+von Kameraansicht, beiden Panelhelligkeiten und Belichtung. Vor der Differenzbildung wird jedes
 Leerbild subpixelgenau registriert, damit kleine Wiederholabweichungen auf strukturierten
 Untergründen nicht als Objekt erscheinen.
 
-Alle Beleuchtungsvarianten derselben Klasse und UR-Pose stimmen über eine gemeinsame
+Alle Beleuchtungsvarianten derselben Klasse und Kameraansicht stimmen über eine gemeinsame
 Segmentierungsmaske und eine gemeinsame orientierte Bounding Box ab. Einzelbilder mit
 schwacher Übereinstimmung werden in `label_report.csv` als `REVIEW` markiert. Unter `review/`
-entstehen repräsentative Overlays und Konsensmasken für jede Klasse und UR-Pose.
+entstehen repräsentative Overlays und Konsensmasken für jede Klasse und Kameraansicht.
 
 Der Ausgabeordner ist direkt als Ultralytics-YOLO-OBB-Datensatz aufgebaut:
 
@@ -256,9 +247,9 @@ Der Ausgabeordner ist direkt als Ultralytics-YOLO-OBB-Datensatz aufgebaut:
 - `data.yaml`
 - `label_summary.json` und `label_report.csv`
 
-Der Train-/Val-Split erfolgt klassenübergreifend nach vollständigen UR-Posen statt zufällig
-nach Bildern. Dadurch landen Beleuchtungsvarianten derselben Ansicht nicht zugleich in
-Training und Validierung. Optional werden die Leerbilder genau einmal mit leeren Labeldateien
+Frühere Serien behalten ihren Train-/Val-Split nach vollständigen Kameraansichten.
+Die feste Ansicht wird zunächst gemeinsam exportiert; die anschließende Trainingsaufbereitung
+teilt vollständige Lichtgruppen auf. Optional werden die Leerbilder genau einmal mit leeren Labeldateien
 als negative Beispiele übernommen. Ist dieselbe Lichtlage für alle Positivklassen als
 unsichtbar ausgeschlossen, wird auch das korrespondierende Leerbild übersprungen. So lernt
 YOLO nicht fälschlich „sehr dunkel = leer“.
@@ -285,7 +276,7 @@ automatisch auffällige Aufnahmen zuerst; ein entferntes Häkchen schließt auss
 Bild aus. Die Entscheidung wird in `curation.json` gespeichert und verändert keine Quelldatei.
 
 Der erzeugte, versionierte Datensatz besitzt getrennte Ordner für Train, Validation und Test.
-Alle Lichtvarianten derselben UR-Pose bleiben im selben Split. `dataset_manifest.json`
+Zusammengehörige Lichtgruppen bleiben im selben Split. `dataset_manifest.json`
 dokumentiert Quelle, Klasse, Beleuchtung, Split und Review-Entscheidung jeder Aufnahme.
 
 Nach der Datensatzprüfung startet **Training starten** `yolo26n-obb.pt` in einem separaten
@@ -297,6 +288,12 @@ Training verwendet keine Spiegelungen oder starken Rotationen, da diese die beid
 unterschiedlichen Bauteilposen verfälschen könnten. `best.pt`, Validierungs-/Testmetriken,
 Confusion-Matrizen und die Fehlalarmrate auf leeren Testbildern liegen anschließend im
 angezeigten Ergebnisordner.
+
+Bei festen Ansichten werden Train/Val/Test reproduzierbar nach vollständigen
+Lichtpaaren aufgeteilt (ungefähr 70/15/15). Alle Belichtungen, Bandstationen,
+Hin-/Rückframes, Klassen und Leerbilder desselben Lichtpaars bleiben zusammen.
+Mindestens drei verschiedene Lichtpaare sind nötig. Die alte Aufteilung nach
+kompletten Ansichten bleibt für frühere Serien erhalten.
 
 Dieselben Schritte sind ohne GUI reproduzierbar:
 
@@ -331,23 +328,12 @@ prüft die erzeugten Bilder und Datensätze erneut und schreibt einen `cleanup_r
 den gewählten Ordner. Abgeschlossene und unvollständige Aufnahmesitzungen werden strikt
 unterschieden; laufende oder unterbrochene Sitzungen werden nicht verändert.
 
-## Sicherheit
+## Hardwarebedienung
 
-Der UR-Statusmonitor verwendet `rtde_receive`. Der separate `rtde_io`-Kanal darf ausschließlich
-die Input-Integer-Register 42 und 43 für eine freigegebene Pose und deren Befehlsnummer schreiben.
-Der eingebaute Dashboard-Client akzeptiert weiterhin nur folgende Abfragen:
-
-- `robotmode`
-- `safetymode`
-- `programState`
-- `get loaded program`
-- `is in remote control`
-- `PolyscopeVersion`
-
-Es gibt keine direkte Bewegungs-, Power-, Brake-, Dashboard-Play- oder URScript-Upload-Funktion.
-Der Roboter bewegt sich ausschließlich durch die zuvor lokal geprüften Bewegungsnodes seines
-laufenden PolyScope-Programms. Das Registerprotokoll und die Inbetriebnahme sind unter
-[`ur_program/README.md`](ur_program/README.md) beschrieben.
+Die Anwendung steuert das Band ausschließlich über die vorhandenen gemeinsamen
+ADS-Fahr-, Stop- und Konfigurationsbefehle. SPS-Prüfungen für Antriebe,
+Kommunikation und Encoder bleiben aktiv. Softwaretests simulieren Geräte und
+lösen keine realen Fahrten aus.
 
 ## Tests
 
@@ -363,10 +349,9 @@ $env:RUN_HARDWARE_TESTS = "1"
 uv run pytest -m hardware tests/hardware
 ```
 
-Die automatischen Hardwaretests öffnen die Kamera, lesen 100 Bilder und beobachten den UR
-30 Sekunden lang. Der Lichttest prüft nur Scan und Verbindung. Sichtbare Lichtbefehle werden
+Die automatischen Hardwaretests öffnen die Kamera und lesen 100 Bilder. Der Lichttest prüft nur Scan und Verbindung. Sichtbare Lichtbefehle werden
 bewusst manuell über die GUI abgenommen, damit ein Testlauf die Beleuchtung nicht überraschend
-verändert. Roboterbefehle werden auch in Hardwaretests nicht gesendet.
+verändert. Förderbandfahrten werden separat am Aufbau geprüft.
 
 ## Fehlerdiagnose
 
@@ -375,8 +360,6 @@ verändert. Roboterbefehle werden auch in Hardwaretests nicht gesendet.
 - **Kurzer Kameraaussetzer:** Die Karte wechselt zunächst auf „Eingeschränkt“ und startet den
   GenTL-Datenstrom automatisch neu. Erst wenn zwei Wiederherstellungsversuche scheitern, wird
   die laufende Aufnahmeserie unterbrochen und kann anschließend fortgesetzt werden.
-- **Nur ein UR-Kanal:** RTDE kann in den Robot Security Settings deaktiviert sein; Dashboard und
-  RTDE werden deshalb getrennt als „eingeschränkt“ dargestellt.
 - **Kein Licht:** Bluetooth-Symbol am Panel aktivieren, Smartphone-App trennen und näher an den
   PC bringen.
 
