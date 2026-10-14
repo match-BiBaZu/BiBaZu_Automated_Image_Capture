@@ -2,8 +2,9 @@
 
 Aktueller Aufbau, Stand 10. Oktober 2026: Die Rutsche sitzt fest auf einem Gestell.
 Die GUI stellt ihre Neigung nicht ein und verwendet keine Roboterverbindung.
-Der vollständige aktuelle Bedienablauf, Installation, Kamera-Bildrate, OBB-Pipeline,
-Training und Bereinigung stehen in [README.md](README.md).
+Schnellstart und Aufnahmeablauf stehen in [README.md](README.md).
+Details zu Kamera-Bildrate, OBB-Pipeline, Training und Bereinigung stehen in der
+[technischen Referenz](docs/technical-reference.md).
 
 ## Aufbau und Schnittstelle
 
