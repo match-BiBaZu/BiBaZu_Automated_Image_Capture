@@ -331,3 +331,94 @@ def test_stop_during_tandem_preparation_prevents_later_enable() -> None:
 def test_finite_jog_duration_includes_acceleration_and_braking() -> None:
     assert move_duration_seconds(100, 10, 3) == pytest.approx(11)
     assert move_duration_seconds(10, 20, 3) == pytest.approx(2)
+
+
+def test_continuous_start_uses_existing_right_direction_and_normal_plc_mode():
+    plc = FakePlc()
+    worker = ConveyorWorker(AppSettings())
+    worker._handle_command(plc, "continuous_start", 10.0, None)
+    assert plc.writes[-1] == {
+        "MAIN.GuiConveyorSpeedMmPerSec": 10.0,
+        "MAIN.GuiConveyorCalibrationMode": False,
+        "MAIN.GuiConveyorEnabled": True,
+    }
+    # Right is the normal forward trajectory; existing PLC reverse wiring is preserved.
+    assert not any("MAIN.GuiConveyorReverse" in values for values in plc.writes)
+    assert worker._continuous_requested
+    worker._handle_command(plc, "continuous_speed", 25.0, None)
+    assert plc.writes[-1] == {"MAIN.GuiConveyorSpeedMmPerSec": 25.0}
+    worker._handle_command(plc, "stop", None, None)
+    assert not worker._continuous_requested
+    assert plc.writes[-1]["MAIN.GuiConveyorEnabled"] is False
+
+
+def test_continuous_stop_during_preparation_never_enables_motors():
+    plc = FakePlc()
+    worker = ConveyorWorker(AppSettings())
+    original_write = plc.write_list_by_name
+
+    def cancel(values, *, cache_symbol_info):
+        response = original_write(values, cache_symbol_info=cache_symbol_info)
+        if "MAIN.ConveyorServoMotorCount" in values:
+            worker.enqueue_stop()
+        return response
+
+    plc.write_list_by_name = cancel
+    worker._handle_command(plc, "continuous_start", 10.0, None)
+    assert not any(values.get("MAIN.GuiConveyorEnabled") for values in plc.writes)
+    assert not worker._continuous_requested
+
+
+@pytest.mark.parametrize("speed", [0.0, -1.0, 200.1, float("nan")])
+def test_continuous_speed_range_does_not_enable_for_invalid_values(speed):
+    plc = FakePlc()
+    worker = ConveyorWorker(AppSettings())
+    worker._handle_command(plc, "continuous_start", speed, None)
+    assert not any(values.get("MAIN.GuiConveyorEnabled") for values in plc.writes)
+
+
+@pytest.mark.parametrize("second_motor_target, expected_running", [(100, True), (0, False)])
+def test_worker_requires_both_motor_targets_to_confirm_continuous_run(
+    monkeypatch, second_motor_target, expected_running
+):
+    import sys
+    from types import SimpleNamespace
+
+    from automated_image_capture.hardware.conveyor import STATUS_SYMBOLS
+
+    worker = ConveyorWorker(AppSettings())
+    worker._continuous_requested = True
+    worker._continuous_deadline = 0
+    plc = FakePlc()
+    plc.values.update(dict.fromkeys(STATUS_SYMBOLS, 0))
+    plc.values.update(
+        {
+            "MAIN.GuiConveyorEnabled": True,
+            "MAIN.StepperPosBusy": True,
+            "MAIN.ConveyorServo1TargetVelocity": 100,
+            "MAIN.ConveyorServo2TargetVelocity": second_motor_target,
+            "MAIN.GuiConveyorSpeedMmPerSec": 10,
+        }
+    )
+    plc.open = lambda: None
+    plc.close = lambda: None
+    plc.read_state = lambda: (5, 0)
+    monkeypatch.setitem(
+        sys.modules,
+        "pyads",
+        SimpleNamespace(
+            Connection=lambda *_: plc,
+            set_timeout=lambda _: None,
+        ),
+    )
+    statuses = []
+
+    def observed(status):
+        statuses.append(status)
+        worker.stop()
+
+    worker.status_changed.connect(observed)
+    worker.run()
+    assert statuses[0].continuous_running is expected_running
+    assert statuses[0].continuous_requested is expected_running
+    assert plc.writes[-1]["MAIN.GuiConveyorEnabled"] is False

@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +49,7 @@ from automated_image_capture.settings import SettingsStore
 from automated_image_capture.ui.cleanup_dialog import CleanupDialog
 from automated_image_capture.ui.labeling_dialog import LabelingDialog
 from automated_image_capture.ui.training_dialog import TrainingDialog
+from automated_image_capture.ui.validation_panel import ValidationPanel, ValidationPreview
 from automated_image_capture.ui.widgets import (
     AcquisitionCard,
     AcquisitionDialog,
@@ -56,6 +58,7 @@ from automated_image_capture.ui.widgets import (
     LightControlCard,
     SettingsDialog,
 )
+from automated_image_capture.validation_controller import ValidationController
 
 
 class MainWindow(QMainWindow):
@@ -102,6 +105,7 @@ class MainWindow(QMainWindow):
             self,
             conveyor=self.conveyor,
         )
+        self.validation = ValidationController(self.camera, self.conveyor, self)
 
         self._build_ui()
         self._wire_adapters()
@@ -136,6 +140,12 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(disconnect_all)
         toolbar.addWidget(labeling_button)
         toolbar.addWidget(training_button)
+        self.validation_banner = QLabel()
+        self.validation_stop = QPushButton("Validation + Band stoppen")
+        self.validation_stop.clicked.connect(lambda: self.validation.stop())
+        self.validation_stop.hide()
+        toolbar.addWidget(self.validation_banner)
+        toolbar.addWidget(self.validation_stop)
         toolbar.addWidget(cleanup_button)
         toolbar.addStretch(1)
         safety = QLabel("Fest montierte Rutsche · feste Neigung · Zweimotoren-Förderband")
@@ -176,7 +186,20 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(cards_container)
         scroll.setMinimumWidth(570)
-        splitter.addWidget(scroll)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(scroll, "Aufnahme")
+        self.validation_panel = ValidationPanel()
+        saved_validation, saved_root = self.settings_store.load_validation()
+        self.validation_panel.speed.setValue(saved_validation.speed_mm_s)
+        self.validation_panel.line.setValue(saved_validation.exit_fraction * 100)
+        self.validation_panel.min_observations.setValue(saved_validation.min_observations)
+        self.validation_panel.min_duration.setValue(saved_validation.min_duration_s)
+        self.validation_panel.min_consensus.setValue(saved_validation.min_consensus * 100)
+        self.validation_panel.output.setText(str(saved_root))
+        self.validation_panel.setMinimumWidth(570)
+        self.tabs.addTab(self.validation_panel, "YOLO Validation")
+        self.tabs.currentChanged.connect(self._validation_tab_changed)
+        splitter.addWidget(self.tabs)
 
         preview_container = QWidget()
         preview_layout = QVBoxLayout(preview_container)
@@ -195,7 +218,10 @@ class MainWindow(QMainWindow):
         self.inference_model.setText(str(self.inference_config.model_path))
         self.inference_model.setToolTip(str(self.inference_config.model_path))
         choose_model = QPushButton("Modell …")
+        self.choose_model = choose_model
         choose_model.clicked.connect(self._choose_inference_model)
+        self.load_model = QPushButton("Laden")
+        self.load_model.clicked.connect(lambda: self.inference_toggle.setChecked(True))
         self.inference_confidence = QDoubleSpinBox()
         self.inference_confidence.setRange(0.01, 1.0)
         self.inference_confidence.setSingleStep(0.05)
@@ -204,7 +230,7 @@ class MainWindow(QMainWindow):
         self.inference_confidence.setPrefix("Konf. ")
         self.inference_confidence.setToolTip("Minimale Konfidenz für eine angezeigte OBB")
         self.inference_max_fps = QSpinBox()
-        self.inference_max_fps.setRange(1, 15)
+        self.inference_max_fps.setRange(1, 60)
         self.inference_max_fps.setValue(round(self.inference_config.max_fps))
         self.inference_max_fps.setSuffix(" FPS")
         self.inference_max_fps.setToolTip("Maximale Bildrate der YOLO-Inferenz")
@@ -217,12 +243,17 @@ class MainWindow(QMainWindow):
         inference_controls.addWidget(self.inference_toggle)
         inference_controls.addWidget(self.inference_model, 1)
         inference_controls.addWidget(choose_model)
+        inference_controls.addWidget(self.load_model)
         inference_controls.addWidget(self.inference_confidence)
         inference_controls.addWidget(self.inference_max_fps)
         inference_controls.addWidget(self.inference_status)
         preview_layout.addLayout(inference_controls)
 
-        self.preview = QLabel("Noch kein Kamerabild")
+        self.preview = ValidationPreview("Noch kein Kamerabild")
+        self.preview.line_fraction = saved_validation.exit_fraction
+        self.preview.line_changed.connect(
+            lambda value: self.validation_panel.line.setValue(value * 100)
+        )
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(640, 480)
         self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -249,6 +280,20 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Kamera {self.config.camera_ip} · SPS {self.config.plc_ip}")
 
     def _wire_adapters(self) -> None:
+        self.validation.changed.connect(self._refresh_validation)
+        self.validation.running_changed.connect(self._validation_running)
+        self.validation.error.connect(lambda message: self._show_error("Validation", message))
+        self.validation.exported.connect(
+            lambda directory: self._append_event(f"Validation exportiert: {directory}")
+        )
+        self.validation_panel.start_requested.connect(self.start_validation)
+        self.validation_panel.stop_requested.connect(lambda: self.validation.stop())
+        self.validation_panel.speed_requested.connect(self._validation_speed)
+        self.validation_panel.export_requested.connect(self._export_validation)
+        self.validation_panel.reset_requested.connect(self.validation.reset)
+        self.validation_panel.line_changed.connect(self._validation_line)
+        self.camera.capture_frame_ready.connect(self._validation_camera_frame)
+        self._refresh_validation()
         for adapter, card in (
             (self.camera, self.camera_card),
             (self.conveyor, self.conveyor_card),
@@ -356,7 +401,8 @@ class MainWindow(QMainWindow):
         self._last_raw_image = raw_image
         worker = self._inference_worker
         if worker is not None and worker.isRunning():
-            worker.submit(image, frame.timestamp)
+            if not self.validation.running:
+                worker.submit(image, frame.timestamp)
             if not self._inference_has_result:
                 self._last_image = raw_image
                 self._render_image()
@@ -374,6 +420,8 @@ class MainWindow(QMainWindow):
         )
 
     def _choose_inference_model(self) -> None:
+        if self.validation.running:
+            return
         current = self.inference_config.model_path
         start_directory = str(current.parent if current.is_file() else current)
         filename, _ = QFileDialog.getOpenFileName(
@@ -384,6 +432,21 @@ class MainWindow(QMainWindow):
         )
         if not filename:
             return
+        if self.validation.has_results:
+            answer = QMessageBox.question(
+                self,
+                "Neue Validierungssitzung",
+                "Für das neue Modell die Ergebnisliste "
+                "zurücksetzen? Die lokale Sitzungssicherung und Exporte bleiben erhalten.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        if self.validation.store is not None:
+            self.validation.reset()
+        self.validation.model = None
+        self._refresh_validation()
         was_running = self.inference_toggle.isChecked()
         if was_running:
             self.inference_toggle.setChecked(False)
@@ -418,6 +481,11 @@ class MainWindow(QMainWindow):
         self.settings_store.save_live_inference(config)
         self._inference_has_result = False
         worker = LiveInferenceWorker(config, self)
+        worker.model_loaded.connect(
+            lambda info, source=worker: (
+                self.validation.set_model(info) if source is self._inference_worker else None
+            )
+        )
         worker.frame_ready.connect(
             lambda frame, source=worker: self._inference_frame_from(source, frame)
         )
@@ -450,6 +518,7 @@ class MainWindow(QMainWindow):
             )
 
     def _inference_frame(self, frame: InferenceFrame) -> None:
+        self.validation.on_frame(frame)
         image = frame.image
         height, width, channels = image.shape
         if channels != 3:
@@ -484,6 +553,7 @@ class MainWindow(QMainWindow):
             self.inference_status.setText(message)
 
     def _inference_error(self, message: str) -> None:
+        self.validation.stop(message)
         self._show_error("Live-Erkennung", message)
         self._append_event(message)
 
@@ -494,6 +564,7 @@ class MainWindow(QMainWindow):
     def _inference_finished(self, worker: LiveInferenceWorker) -> None:
         if worker is not self._inference_worker:
             return
+        self.validation.stop("YOLO-Inferenz wurde beendet.")
         self._inference_worker = None
         if self.inference_toggle.isChecked():
             self.inference_toggle.blockSignals(True)
@@ -516,6 +587,7 @@ class MainWindow(QMainWindow):
     def _render_image(self) -> None:
         if self._last_image is None:
             return
+        self.preview.source_size = (self._last_image.width(), self._last_image.height())
         pixmap = QPixmap.fromImage(self._last_image).scaled(
             self.preview.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -581,6 +653,9 @@ class MainWindow(QMainWindow):
             self.settings_store.save(self.config)
 
     def open_settings(self) -> None:
+        if self.validation.running:
+            self._show_error("Einstellungen", "Bitte zuerst die Validation stoppen.")
+            return
         dialog = SettingsDialog(self.config, self)
         if dialog.exec() != SettingsDialog.DialogCode.Accepted or dialog.result_config is None:
             return
@@ -642,6 +717,9 @@ class MainWindow(QMainWindow):
         self._append_event("Einstellungen für die automatische Aufnahme gespeichert.")
 
     def start_acquisition(self) -> None:
+        if self.validation.running:
+            self._show_error("Aufnahme", "Bitte zuerst die Validation stoppen.")
+            return
         checks = self.acquisition.preflight_checks(self.acquisition_config)
         self.acquisition_card.set_preflight(checks)
         failed = [check for check in checks if not check.ready]
@@ -675,6 +753,9 @@ class MainWindow(QMainWindow):
             self.acquisition.start(self.acquisition_config)
 
     def resume_acquisition(self) -> None:
+        if self.validation.running:
+            self._show_error("Aufnahme", "Bitte zuerst die Validation stoppen.")
+            return
         if not self.acquisition.resume_available:
             return
         remaining = self.acquisition.remaining_count
@@ -697,6 +778,7 @@ class MainWindow(QMainWindow):
         self._append_event(f"Aufnahme: {message}")
 
     def _acquisition_running(self, running: bool) -> None:
+        self.validation_panel.start.setEnabled(not running and not self.validation.running)
         for card in (
             self.camera_card,
             self.conveyor_card,
@@ -716,6 +798,85 @@ class MainWindow(QMainWindow):
         )
         self.acquisition_card.set_preflight(checks)
 
+    def _validation_tab_changed(self, index: int) -> None:
+        self.preview.validation_visible = index == 1
+        self.preview.update()
+
+    def _validation_line(self, value: float) -> None:
+        if not self.validation.running:
+            self.preview.line_fraction = value
+            self.preview.update()
+
+    def _refresh_validation(self) -> None:
+        self.validation_panel.refresh(self.validation)
+        self.validation_panel.start.setEnabled(
+            not self.validation.running and not self.acquisition.running
+        )
+        self.preview.tracks = (
+            list(self.validation.tracker.tracks.values()) if self.validation.tracker else []
+        )
+        self.preview.update()
+        self.validation_banner.setText(
+            f"Validation: {self.validation.state} · {self.validation.fps:.1f} FPS"
+            if self.validation.running
+            else ""
+        )
+
+    def _validation_running(self, running: bool) -> None:
+        # Bypass the GUI event queue: submit only retains the newest raw frame.
+        self.camera.set_capture_frame_consumer(self._validation_camera_frame if running else None)
+        self.validation_panel.set_busy(running)
+        self.validation_stop.setVisible(running)
+        self.preview.line_editable = not running
+        for widget in (
+            self.choose_model,
+            self.load_model,
+            self.inference_toggle,
+            self.inference_confidence,
+            self.inference_max_fps,
+            self.acquisition_card,
+            self.conveyor_card,
+            self.camera_card,
+        ):
+            widget.setEnabled(not running)
+        if not running:
+            self._refresh_acquisition_preflight()
+
+    def start_validation(self) -> None:
+        if self.acquisition.running:
+            self._show_error("Validation", "Bitte zuerst die automatische Aufnahme stoppen.")
+            return
+        try:
+            settings = self.validation_panel.settings()
+            if not self.validation_panel.output.text().strip():
+                raise ValueError("Bitte einen Ordner für die Sitzungssicherung wählen.")
+            root = Path(self.validation_panel.output.text()).expanduser()
+            config = self._current_inference_config().validated()
+            if self.validation.start(settings, root, config):
+                self.settings_store.save_validation(settings, root)
+                if self._inference_worker is None:
+                    self.inference_toggle.setChecked(True)
+        except (ValueError, OSError) as exc:
+            self._show_error("Validation", str(exc))
+
+    def _validation_camera_frame(self, frame: CameraFrame) -> None:
+        worker = self._inference_worker
+        if self.validation.running and worker is not None and worker.isRunning():
+            worker.submit(frame.image, frame.timestamp)
+
+    def _validation_speed(self, speed: float) -> None:
+        try:
+            if not self.validation.set_speed(speed):
+                self._show_error("Validation", "Geschwindigkeit konnte nicht übernommen werden.")
+        except (ValueError, RuntimeError) as exc:
+            self.validation.stop(str(exc))
+
+    def _export_validation(self, directory: str) -> None:
+        try:
+            self.validation.export(Path(directory))
+        except (ValueError, RuntimeError) as exc:
+            self._show_error("Validation", str(exc))
+
     def _show_error(self, device: str, message: str) -> None:
         self.statusBar().showMessage(f"{device}: {message}", 10000)
         self._logger.error("%s: %s", device, message)
@@ -729,6 +890,7 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         self._closing = True
+        self.validation.close()
         self.light_card.command_timer.stop()
         self.light_2_card.command_timer.stop()
         self.acquisition.stop()
@@ -740,6 +902,7 @@ class MainWindow(QMainWindow):
         event.accept()
 
     async def shutdown_async(self) -> None:
+        self.validation.close()
         self._stop_live_inference()
         if self._training_dialog is not None:
             self._training_dialog.shutdown()

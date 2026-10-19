@@ -1209,8 +1209,10 @@ class AcquisitionController(QObject):
                         (
                             "SPS-Positionswert durch eine Positionsänderung bestätigt"
                             if position_ready
-                            else "Bitte nach dem PDO-Mapping eine manuelle Testfahrt ausführen; "
-                            "MAIN.StepperInternalPosition muss sich dabei ändern"
+                            else "Noch keine Änderung der Encoderposition beobachtet. "
+                            "In der Förderbandkarte eine kurze manuelle Testfahrt mit Links/Rechts "
+                            "ausführen und die SPS-Position prüfen. Danach das Bauteil wieder "
+                            "hinten platzieren und 'Aktuelle Position = 0 mm' wählen."
                         ),
                     )
                 )

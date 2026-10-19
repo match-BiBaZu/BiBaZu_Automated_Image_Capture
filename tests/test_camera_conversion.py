@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import threading
+
 import numpy as np
 import pytest
+from PyQt6.QtTest import QSignalSpy
 
 from automated_image_capture.hardware.camera import (
     MAX_CONSECUTIVE_FETCH_TIMEOUTS,
+    CameraAdapter,
+    CameraWorker,
     advance_frame_deadline,
     camera_error_message,
     camera_fetch_timeout_seconds,
@@ -14,6 +19,30 @@ from automated_image_capture.hardware.camera import (
     is_camera_fetch_timeout,
     should_retry_camera_fetch,
 )
+from automated_image_capture.models import CameraFrame
+from automated_image_capture.settings import AppSettings
+
+
+def test_direct_capture_consumer_does_not_need_gui_events_and_restores_capture_signal(qtbot):
+    worker = CameraWorker(AppSettings())
+    adapter = CameraAdapter(AppSettings())
+    adapter._worker = worker
+    calls = []
+    adapter.set_capture_frame_consumer(lambda frame: calls.append((threading.get_ident(), frame)))
+    queued = QSignalSpy(worker.capture_frame_ready)
+    frame = CameraFrame(np.ones((10, 12), np.uint8), "Mono8", 123)
+    producer = threading.Thread(target=worker._publish_capture_frame, args=(frame,))
+    producer.start()
+    producer.join(timeout=2)
+    assert not producer.is_alive()
+    assert len(calls) == 1 and calls[0][1] is frame
+    assert calls[0][0] != threading.get_ident()
+    assert not queued
+    adapter.set_capture_frame_consumer(None)
+    worker._publish_capture_frame(frame)
+    assert len(queued) == 1 and queued[0][0] is frame
+    assert len(calls) == 1
+    adapter._worker = None
 
 
 def test_mono8_to_rgb() -> None:

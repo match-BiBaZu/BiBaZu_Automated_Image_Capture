@@ -570,6 +570,15 @@ def test_synchronized_preflight_requires_position_feedback_test(tmp_path: Path) 
 
     assert not feedback.ready
     assert "manuelle Testfahrt" in feedback.detail
+    assert "Links/Rechts" in feedback.detail
+    assert "PDO-Mapping" not in feedback.detail
+    controller.conveyor.status.position_feedback_verified = True
+    feedback = next(
+        check
+        for check in controller.preflight_checks(settings)
+        if check.key == "conveyor_position_feedback"
+    )
+    assert feedback.ready
     controller.close()
 
 

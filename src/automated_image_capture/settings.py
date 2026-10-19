@@ -406,7 +406,7 @@ class SettingsStore:
             model_path=model_path,
             confidence=float(self._settings.value("inference/confidence", 0.25)),
             image_size=int(self._settings.value("inference/image_size", 640)),
-            max_fps=float(self._settings.value("inference/max_fps", 5.0)),
+            max_fps=float(self._settings.value("inference/max_fps", 15.0)),
             device=str(self._settings.value("inference/device", "0")),
         ).validated(require_model=False)
 
@@ -417,6 +417,29 @@ class SettingsStore:
         self._settings.setValue("inference/image_size", config.image_size)
         self._settings.setValue("inference/max_fps", config.max_fps)
         self._settings.setValue("inference/device", config.device)
+        self._settings.sync()
+
+    def load_validation(self):
+        from automated_image_capture.validation import ValidationSettings
+
+        defaults = ValidationSettings()
+        values = {}
+        for name in defaults.__dataclass_fields__:
+            kind = int if name == "min_observations" else float
+            values[name] = kind(self._settings.value(f"validation/{name}", getattr(defaults, name)))
+        root = Path(
+            str(
+                self._settings.value(
+                    "validation/output_directory", str(Path.home() / "Pictures" / "YOLOValidation")
+                )
+            )
+        )
+        return ValidationSettings(**values).validated(), root
+
+    def save_validation(self, config, root: Path) -> None:
+        for name in config.__dataclass_fields__:
+            self._settings.setValue(f"validation/{name}", getattr(config, name))
+        self._settings.setValue("validation/output_directory", str(root))
         self._settings.sync()
 
     def load_cleanup(self):

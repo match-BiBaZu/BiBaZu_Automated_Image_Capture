@@ -3,9 +3,11 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
-from PyQt6.QtCore import QSettings
+import pytest
+from PyQt6.QtCore import QSettings, QTimer
 from PyQt6.QtTest import QSignalSpy
 
 from automated_image_capture.inference import (
@@ -30,6 +32,9 @@ class FakeResult:
 
 
 class FakeModel:
+    names = {0: "Pose 1", 1: "Pose 2", 2: "Pose 3"}
+    task = "obb"
+
     def __init__(self) -> None:
         self.sources: list[np.ndarray] = []
 
@@ -91,6 +96,24 @@ def test_live_worker_runs_model_in_background(qtbot, tmp_path: Path) -> None:
     assert worker.stop()
 
 
+def test_loaded_model_classes_are_available_without_any_detection(qtbot, tmp_path):
+    path = tmp_path / "model.pt"
+    path.touch()
+    worker = LiveInferenceWorker(LiveInferenceConfig(path), model_factory=lambda _: FakeModel())
+    loaded = QSignalSpy(worker.model_loaded)
+    frames = QSignalSpy(worker.frame_ready)
+    worker.start()
+    try:
+        qtbot.waitUntil(lambda: len(loaded) == 1, timeout=5000)
+        info = loaded[0][0]
+        assert info.task == "obb"
+        assert info.classes == FakeModel.names
+        assert len(info.sha256) == 64
+        assert not frames
+    finally:
+        assert worker.stop()
+
+
 def test_live_worker_drops_stale_frames(qtbot, tmp_path: Path) -> None:
     model_path = tmp_path / "best.pt"
     model_path.touch()
@@ -112,6 +135,75 @@ def test_live_worker_drops_stale_frames(qtbot, tmp_path: Path) -> None:
     assert fake_model.sources[0][0, 0, 0] == 1
     assert fake_model.sources[1][0, 0, 0] == 3
     assert worker.stop()
+
+
+def test_mono_frames_are_converted_only_after_latest_frame_selection(qtbot, tmp_path):
+    path = tmp_path / "best.pt"
+    path.touch()
+    model = BlockingModel()
+    worker = LiveInferenceWorker(
+        LiveInferenceConfig(path, max_fps=60), model_factory=lambda _: model
+    )
+    frames = QSignalSpy(worker.frame_ready)
+    worker.start()
+    try:
+        worker.submit(np.full((50, 60), 1, np.uint8))
+        assert model.started.wait(timeout=2)
+        worker.submit(np.full((50, 60), 2, np.uint8))
+        worker.submit(np.full((50, 60), 3, np.uint8))
+        model.release.set()
+        qtbot.waitUntil(lambda: len(frames) >= 2, timeout=3000)
+        assert [image[0, 0].tolist() for image in model.sources] == [[1, 1, 1], [3, 3, 3]]
+        assert frames[1][0].raw_image.shape == (50, 60, 3)
+        assert frames[1][0].timings["convert_ms"] >= 0
+        assert frames[1][0].timings["predict_ms"] >= 0
+    finally:
+        model.release.set()
+        assert worker.stop()
+
+
+@pytest.mark.parametrize("clock_offset", [3600, -3600])
+def test_fps_limit_is_independent_of_performance_clock_epoch(
+    qtbot, tmp_path, monkeypatch, clock_offset
+):
+    from automated_image_capture import inference
+
+    # Windows/Python 3.12 can expose different epochs for these two clocks.
+    # Both extra waits and accidentally disabling the FPS cap are regressions.
+    monkeypatch.setattr(
+        inference,
+        "time",
+        SimpleNamespace(
+            time=time.time,
+            monotonic=time.monotonic,
+            perf_counter=lambda: time.perf_counter() + clock_offset,
+        ),
+    )
+    path = tmp_path / "model.pt"
+    path.touch()
+    model = FakeModel()
+    prediction_times = []
+    original_predict = model.predict
+
+    def predict(**kwargs):
+        prediction_times.append(time.perf_counter())
+        return original_predict(**kwargs)
+
+    model.predict = predict
+    worker = LiveInferenceWorker(
+        LiveInferenceConfig(path, max_fps=10), model_factory=lambda _: model
+    )
+    feed = QTimer()
+    feed.timeout.connect(lambda: worker.submit(np.zeros((50, 60, 3), np.uint8)))
+    worker.start()
+    feed.start(2)
+    try:
+        qtbot.waitUntil(lambda: len(prediction_times) >= 5, timeout=2000)
+        # Four periods at 10 FPS; allow scheduler/clock resolution jitter.
+        assert prediction_times[4] - prediction_times[0] >= 0.3
+    finally:
+        feed.stop()
+        assert worker.stop()
 
 
 def test_live_settings_are_persisted(tmp_path: Path) -> None:

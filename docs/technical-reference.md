@@ -16,6 +16,70 @@ PNG-/YAML-Speicherung, Fortsetzen, OBB-Annotation, Kuratierung, YOLO-Training,
 Liveerkennung und Speicherbereinigung sind enthalten. Die Anwendung benötigt
 keinen Roboter und kein Roboterprogramm.
 
+## YOLO Validation: Datenfluss und Grenzen
+
+Der Reiter verwendet dieselbe Modellauswahl und denselben Inferenzworker wie die
+Liveerkennung. `InferenceModelInfo` meldet beim Laden Dateipfad, SHA-256, Modelltyp
+und Klassenliste. `InferenceFrame.raw_image` liefert zusätzlich das unveränderte
+RGB-Bild für Belege. Für die Validation wird der separate `capture_frame_ready`-Pfad
+mit dem gewählten Inferenzlimit aktiviert; Vorschau-FPS begrenzen diesen Pfad nicht.
+Inferenz und Kamera behalten keine Warteschlange alter Bilder.
+Der Inferenzlimiter berechnet und prüft seine Deadlines ausschließlich mit
+`time.monotonic()`. `time.perf_counter()` dient nur zur Laufzeitmessung: Unter
+Python 3.12/Windows können die Zeitgeber unterschiedliche Bezugspunkte haben.
+Eine Vermischung erzeugte auf diesem Rechner etwa 0,19 s zusätzliche Wartezeit
+pro Bild und begrenzte den Worker auch bei höherem FPS-Limit auf wenige FPS.
+
+`ValidationTracker` verwendet klassenunabhängige OBB-Unterdrückung (IoU 0,6),
+Positionsvorhersage aus gemessener Bildgeschwindigkeit und Hungarian-Zuordnung
+über SciPy. Kosten kombinieren vorhergesagte OBB-Überdeckung und Mittelpunktabstand.
+Abstand, vertikale Verschiebung und Flächenverhältnis begrenzen zulässige Zuordnungen.
+Bei konkurrierenden Zuordnungen mit weniger als 0,12 Kostendifferenz werden
+keine Klassenstimmen ausgetauscht; die betroffenen Tracks bleiben unsicher.
+Neue Bauteile müssen den rechten Eintrittsbereich (letzte 25 % der Breite) berühren.
+Eine Verschiebung im Bild wird in Pixeln pro Zeit gemessen, nicht aus einer
+unbekannten Millimeter-pro-Pixel-Kalibrierung abgeleitet.
+
+Nur vollständig sichtbare OBBs rechts der Abschlusslinie stimmen ab. Die
+Klassenstimmen summieren ihre jeweiligen YOLO-Konfidenzen. Ein eindeutiges Ergebnis
+benötigt standardmäßig fünf Beobachtungen, 0,25 s Beobachtungsdauer und 70 % Konsens.
+Die Abschlussbeobachtung selbst wird ausgeschlossen. Alle verlorenen Tracks
+werden nach 0,5 s unvollständig abgeschlossen und noch bis zu 1,5 s länger als
+gesperrte Identität gehalten, um kurzfristiges Wiederauftauchen nicht erneut zu zählen.
+Jeder im Eintrittsbereich angelegte Track wird abgeschlossen, auch bei nur einem
+Treffer oder ohne gültige Klassenstimme. Es gibt keinen stillen Mindesttrefferfilter.
+`reason` benennt Einzel-Erkennung, fehlende gültige Beobachtungen, mehrdeutige
+Zuordnung oder verfehlte Konsensanforderungen; die GUI zeigt diesen Grund und
+die Gesamtzahl inklusive Fehlversuchen. Die CSV-/JSON-Sicherung enthält dieselben Fälle.
+Die Zählung erfasst begonnene YOLO-Tracks; nie detektierte Teile sind ohne eine
+unabhängige Anwesenheits- oder Referenzzählung nicht messbar.
+Überlappende oder verdeckte Teile sind kein garantierter Betriebsfall dieser Version.
+
+`ValidationController` koordiniert Modell-Warmup, frische Kamerainferenz, Bandfreigabe,
+Tracking, Stop und Sicherung. Fehler bzw. ausbleibende Bild-/Bandrückmeldungen stoppen
+den Lauf; es gibt keinen automatischen Wiederanlauf. Die kontinuierliche Bandsteuerung
+verwendet vorhandene ADS-Symbole `GuiConveyorSpeedMmPerSec`, `GuiConveyorEnabled` und
+den bestehenden gestoppten Tandem-Konfigurationsablauf. Als Dauerlaufbestätigung werden
+SPS-Busy/Enable sowie nicht-null Sollgeschwindigkeiten beider Motoren verlangt.
+Die Bestätigung belegt den gestarteten SPS-Fahrauftrag; die Hardwareabnahme muss
+zusätzlich die tatsächliche Bewegung beider Antriebe prüfen. `GuiConveyorReverse`
+wird nicht verändert; Dauerlauf entspricht dem bisherigen manuellen Rechts-Befehl.
+Aufnahme- und Validation-Steuerung sind gegenseitig gesperrt.
+
+`ValidationSessionStore` schreibt seriell im Hintergrund mit höchstens 16
+ausstehenden Schreibaufträgen. Je Track/Klasse wird nur der bislang beste gültige
+Beleg vorgehalten; bei Abschluss wird das Bild der gewählten Pose unter `bilder/`
+fixiert. `part_*.json` hält einzelne Ergebnisse, `session.json` wird atomar ersetzt.
+Ein Export wird hinter den zugehörigen Schreibaufträgen eingeordnet und verwendet
+einen unveränderlichen Snapshot der abgeschlossenen Ergebnisse. Jeder Export
+erhält einen neuen Ordner und überschreibt keine frühere Sicherung.
+Die Oberfläche beginnt nach einem Neustart mit einer leeren Validierungsliste;
+bisherige Sitzungen bleiben im Sicherungsordner erhalten.
+
+Automatisierte Abnahme: `tests/test_validation.py`, die ergänzten Band-/Inferenztests
+und GUI-Tests. Physische Abnahme: zunächst ein Teil, dann zwei getrennte Teile;
+Bandrichtung, Track-IDs, Abschlusslinie, Posezähler und Belegbilder kontrollieren.
+
 ## Voraussetzungen
 
 - Windows 10/11 x64
@@ -364,6 +428,17 @@ verändert. Förderbandfahrten werden separat am Aufbau geprüft.
   die laufende Aufnahmeserie unterbrochen und kann anschließend fortgesetzt werden.
 - **Kein Licht:** Bluetooth-Symbol am Panel aktivieren, Smartphone-App trennen und näher an den
   PC bringen.
+- **Panel sichtbar, aber GATT/„Could not start notify … Unreachable“:** Gespeicherte
+  Neewer-Kopplungen unter Windows → Bluetooth und Geräte entfernen, Panels neu starten und
+  direkt in der GUI verbinden. Veraltete Windows-Kopplungen können trotz sichtbarer
+  Werbung den GATT-Zugriff auf beide Panels verhindern. Eine erneute Windows-Kopplung
+  ist für die Anwendung nicht nötig. Am 19.10.2026 wurden beide RGB660 PRO nach dem
+  Entfernen der gespeicherten Kopplungen wieder mit erfolgreicher Statusabfrage verbunden.
+
+Die GUI führt BLE-Suche und Verbindungsaufbau beider Panels nacheinander aus.
+Verbindungsaufbau und Freigabe haben Zeitlimits; Abbrechen und Beenden warten auf
+die Freigabe eines bereits geöffneten Clients. Beim Verbinden werden nur Statusabfragen
+gesendet, keine Leistungs-, Helligkeits- oder Farbbefehle.
 
 Ein passiver BLE-Scan kann bei Bedarf mit `uv run python scripts/probe_ble.py` ausgeführt werden.
 Mit `--connect <Adresse>` liest das Skript zusätzlich nur die angebotenen GATT-Service-UUIDs.

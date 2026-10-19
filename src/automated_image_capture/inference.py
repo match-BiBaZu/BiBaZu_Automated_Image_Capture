@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ class LiveInferenceConfig:
     model_path: Path
     confidence: float = 0.25
     image_size: int = 640
-    max_fps: float = 5.0
+    max_fps: float = 15.0
     device: str = "0"
 
     def validated(self, *, require_model: bool = True) -> LiveInferenceConfig:
@@ -47,6 +48,16 @@ class InferenceFrame:
     detections: tuple[InferenceDetection, ...]
     inference_ms: float
     timestamp: float
+    raw_image: np.ndarray | None = None
+    timings: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class InferenceModelInfo:
+    path: str
+    sha256: str
+    task: str
+    classes: dict[int, str]
 
 
 def find_latest_model(search_root: Path | None = None) -> Path:
@@ -153,6 +164,7 @@ class LiveInferenceWorker(QThread):
     frame_ready = pyqtSignal(object)
     status_changed = pyqtSignal(str)
     error = pyqtSignal(str)
+    model_loaded = pyqtSignal(object)
 
     def __init__(
         self,
@@ -169,7 +181,7 @@ class LiveInferenceWorker(QThread):
         self._stopping = False
 
     def submit(self, image: np.ndarray, timestamp: float | None = None) -> None:
-        if image.ndim != 3 or image.shape[2] != 3:
+        if image.ndim != 2 and (image.ndim != 3 or image.shape[2] != 3):
             return
         with self._condition:
             self._latest_frame = (image, time.time() if timestamp is None else timestamp)
@@ -201,6 +213,20 @@ class LiveInferenceWorker(QThread):
         try:
             self.status_changed.emit("Modell wird geladen …")
             model = self._create_model()
+            raw_names = getattr(model, "names", {})
+            names = dict(raw_names) if isinstance(raw_names, dict) else dict(enumerate(raw_names))
+            digest = hashlib.sha256()
+            with self._config.model_path.open("rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(block)
+            self.model_loaded.emit(
+                InferenceModelInfo(
+                    str(self._config.model_path.resolve()),
+                    digest.hexdigest(),
+                    str(getattr(model, "task", "")),
+                    {int(cid): str(name) for cid, name in names.items()},
+                )
+            )
             self.status_changed.emit(f"Bereit · {self._config.model_path.name}")
             next_allowed = 0.0
             while True:
@@ -216,8 +242,16 @@ class LiveInferenceWorker(QThread):
                     self._latest_frame = None
                     config = self._config
 
+                # Deadlines must use the same clock as the wait loop. On Python
+                # 3.12/Windows perf_counter and monotonic can have different epochs.
+                schedule_started = time.monotonic()
                 started = time.perf_counter()
-                bgr = np.ascontiguousarray(image[:, :, ::-1])
+                if image.ndim == 2:
+                    image = cv2.cvtColor(image, cv2.COLOR_GRAY2RGB)
+                    bgr = image  # All channels are identical for Mono8 input.
+                else:
+                    bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+                converted = time.perf_counter()
                 results = model.predict(
                     source=bgr,
                     imgsz=config.image_size,
@@ -225,14 +259,28 @@ class LiveInferenceWorker(QThread):
                     device=config.device,
                     verbose=False,
                 )
-                inference_ms = (time.perf_counter() - started) * 1000
+                predicted = time.perf_counter()
+                inference_ms = (predicted - started) * 1000
                 result = results[0] if results else None
                 detections = () if result is None else extract_obb_detections(result)
+                extracted = time.perf_counter()
                 annotated = draw_obb_overlay(image, detections)
+                overlaid = time.perf_counter()
+                timings = {
+                    "convert_ms": (converted - started) * 1000,
+                    "predict_ms": (predicted - converted) * 1000,
+                    "extract_ms": (extracted - predicted) * 1000,
+                    "overlay_ms": (overlaid - extracted) * 1000,
+                    "worker_ms": (overlaid - started) * 1000,
+                    **{
+                        f"backend_{key}_ms": float(value)
+                        for key, value in (getattr(result, "speed", None) or {}).items()
+                    },
+                }
                 self.frame_ready.emit(
-                    InferenceFrame(annotated, detections, inference_ms, timestamp)
+                    InferenceFrame(annotated, detections, inference_ms, timestamp, image, timings)
                 )
-                next_allowed = started + 1.0 / config.max_fps
+                next_allowed = schedule_started + 1.0 / config.max_fps
         except Exception as exc:  # hardware/model/runtime errors must not take down the GUI
             message = f"Live-Erkennung fehlgeschlagen: {exc}"
             self.status_changed.emit("Fehler")

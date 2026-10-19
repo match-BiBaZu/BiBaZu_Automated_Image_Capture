@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QPoint, QSettings, Qt
 from PyQt6.QtTest import QSignalSpy
 from PyQt6.QtWidgets import QPushButton
 
@@ -80,6 +80,106 @@ def test_dashboard_exposes_storage_cleanup_dialog(qtbot, tmp_path) -> None:
     labels = {button.text() for button in window.findChildren(QPushButton)}
 
     assert "Speicher bereinigen …" in labels
+
+
+def test_validation_tab_shares_preview_and_shows_all_model_classes(qtbot, tmp_path):
+    from automated_image_capture.inference import InferenceModelInfo
+
+    window = make_window(qtbot, tmp_path)
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == [
+        "Aufnahme",
+        "YOLO Validation",
+    ]
+    window.validation.set_model(InferenceModelInfo("model.pt", "hash", "obb", {0: "A", 1: "B"}))
+    window.tabs.setCurrentIndex(1)
+    assert window.preview.validation_visible
+    assert window.validation_panel.counts.item(1, 0).text() == "1: B"
+    assert window.validation_panel.counts.item(1, 1).text() == "0"
+    window.validation_panel.line.setValue(12)
+    assert window.preview.line_fraction == 0.12
+    assert window.inference_max_fps.maximum() == 60
+
+
+def test_validation_shows_single_failed_entry_and_failure_totals(qtbot, tmp_path):
+    from automated_image_capture.inference import InferenceModelInfo
+    from automated_image_capture.validation import ValidationSettings, ValidationTracker
+
+    window = make_window(qtbot, tmp_path)
+    window.validation.set_model(InferenceModelInfo("model.pt", "hash", "obb", {0: "A"}))
+    tracker = ValidationTracker(ValidationSettings(), {0: "A"})
+    window.validation.tracker = tracker
+    image = np.zeros((400, 1000, 3), np.uint8)
+    entry = InferenceDetection(0, "A", 0.9, ((960, 100), (1010, 100), (1010, 150), (960, 150)))
+    tracker.update(image, (entry,), 1)
+    tracker.update(image, (), 1.6)
+    window._refresh_validation()
+    panel = window.validation_panel
+    assert panel.results.rowCount() == 1
+    assert panel.results.item(0, 5).text() == "Unvollständig"
+    assert "nur eine Erkennung" in panel.results.item(0, 6).text()
+    assert "Abgeschlossen: 1" in panel.summary.text()
+    assert "Erkannt: 0" in panel.summary.text()
+    assert "Unvollständig: 1" in panel.summary.text()
+    window.validation.reset()
+    assert panel.results.rowCount() == 0
+    assert "Abgeschlossen: 0" in panel.summary.text()
+
+
+def test_validation_camera_uses_mono_capture_stream_independent_of_preview(qtbot, tmp_path):
+    from types import SimpleNamespace
+
+    from automated_image_capture.models import CameraFrame
+
+    window = make_window(qtbot, tmp_path)
+    submissions = []
+    window._inference_worker = SimpleNamespace(
+        isRunning=lambda: True,
+        submit=lambda image, timestamp: submissions.append((image, timestamp)),
+        stop=lambda: True,
+        deleteLater=lambda: None,
+    )
+    window.validation.state = "warming"
+    window._validation_camera_frame(CameraFrame(np.ones((12, 16), np.uint8), "Mono8", 123))
+    assert submissions[0][0].shape == (12, 16)
+    assert submissions[0][1] == 123
+    window._camera_frame(CameraFrame(np.ones((12, 16, 3), np.uint8), "RGB8", 124))
+    assert len(submissions) == 1
+    window.validation.state = "idle"
+
+
+def test_validation_line_mouse_editing_respects_image_letterboxing_and_run_lock(qtbot):
+    from automated_image_capture.ui.validation_panel import ValidationPreview
+
+    preview = ValidationPreview("")
+    qtbot.addWidget(preview)
+    preview.resize(400, 400)
+    preview.source_size = (1000, 500)
+    preview.validation_visible = True
+    preview.show()
+    changes = QSignalSpy(preview.line_changed)
+    qtbot.mouseClick(preview, Qt.MouseButton.LeftButton, pos=QPoint(80, 200))
+    assert len(changes) == 1 and changes[0][0] == 0.2
+    qtbot.mouseClick(preview, Qt.MouseButton.LeftButton, pos=QPoint(80, 10))
+    assert len(changes) == 1
+    preview.line_editable = False
+    qtbot.mouseClick(preview, Qt.MouseButton.LeftButton, pos=QPoint(120, 200))
+    assert len(changes) == 1
+
+
+def test_validation_blocks_acquisition_and_keeps_stop_visible_on_tab_switch(qtbot, tmp_path):
+    window = make_window(qtbot, tmp_path)
+    window.validation.state = "warming"
+    window._validation_running(True)
+    assert window.camera._capture_consumer == window._validation_camera_frame
+    window.tabs.setCurrentIndex(0)
+    assert not window.validation_stop.isHidden()
+    assert not window.choose_model.isEnabled()
+    assert not window.validation_panel.line.isEnabled()
+    window.start_acquisition()
+    assert not window.acquisition.running
+    window.validation.state = "idle"
+    window._validation_running(False)
+    assert window.camera._capture_consumer is None
 
 
 def test_light_controls_follow_connection_state(qtbot, tmp_path) -> None:

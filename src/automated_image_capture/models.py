@@ -92,6 +92,9 @@ class ConveyorStatus:
     sampled_at: float | None = None
     position_feedback_verified: bool = False
     last_move: ConveyorMove | None = None
+    continuous_requested: bool = False
+    continuous_running: bool = False
+    continuous_speed_mm_s: float = 0.0
 
 
 @dataclass(slots=True, frozen=True)

@@ -166,6 +166,114 @@ async def test_stalled_light_command_disconnects_cleanly(qtbot, monkeypatch) -> 
     await adapter.shutdown()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["disconnect", "shutdown", "timeout", "failure"])
+async def test_incomplete_connection_releases_client(qtbot, monkeypatch, action) -> None:
+    started = asyncio.Event()
+
+    class IncompleteLight(FakeLight):
+        disconnected = False
+
+        async def connect(self) -> None:
+            self.client.is_connected = True
+            started.set()
+            if action == "failure":
+                raise RuntimeError("Could not start notify on 000A: Unreachable")
+            await asyncio.Event().wait()
+
+        async def disconnect(self) -> None:
+            # Exercise asynchronous cleanup before considering Disconnect complete.
+            await asyncio.sleep(0.01)
+            await super().disconnect()
+            self.disconnected = True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "neewerlite",
+        SimpleNamespace(NeewerScanner=FakeScanner, NeewerLight=IncompleteLight),
+    )
+    if action == "timeout":
+        monkeypatch.setattr(light_module, "LIGHT_CONNECT_TIMEOUT_SECONDS", 0.02)
+    adapter = LightAdapter(AppSettings(auto_reconnect=False))
+    errors = []
+    adapter.error.connect(errors.append)
+    adapter.connect()
+    await started.wait()
+    light = FakeLight.instances[-1]
+
+    if action == "disconnect":
+        adapter.disconnect()
+        await wait_for(lambda: adapter.state is ConnectionState.DISCONNECTED)
+    elif action == "shutdown":
+        await adapter.shutdown()
+    else:
+        await wait_for(lambda: adapter.state is ConnectionState.ERROR)
+        assert errors
+        assert "GATT" in errors[-1] if action == "failure" else "Zeitüberschreitung" in errors[-1]
+
+    assert light.disconnected
+    assert not light.client.is_connected
+    assert adapter._light is None
+    assert not adapter._status.connected
+    assert not light.commands
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_two_panels_serialize_scans_and_connections(qtbot, monkeypatch) -> None:
+    operations = []
+
+    class RecordingScanner:
+        @staticmethod
+        async def scan(timeout=5.0):
+            operations.append("scan-start")
+            await asyncio.sleep(0.01)
+            operations.append("scan-end")
+            return [
+                SimpleNamespace(name="NEEWER-RGB660", address="AA:01"),
+                SimpleNamespace(name="NEEWER-RGB660", address="AA:02"),
+            ]
+
+    class RecordingLight(FakeLight):
+        async def connect(self):
+            operations.append(("connect-start", self.address.address))
+            await asyncio.sleep(0.01)
+            await super().connect()
+            operations.append(("connect-end", self.address.address))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "neewerlite",
+        SimpleNamespace(NeewerScanner=RecordingScanner, NeewerLight=RecordingLight),
+    )
+    config = AppSettings(light_address="AA:01", light_2_address="AA:02", auto_reconnect=False)
+    first = LightAdapter(config)
+    second = LightAdapter(config, address_attribute="light_2_address")
+    try:
+        first.connect()
+        first.connect()  # Repeated clicks must not open another session.
+        second.connect()
+        await wait_for(
+            lambda: (
+                first.state is ConnectionState.CONNECTED
+                and second.state is ConnectionState.CONNECTED
+            )
+        )
+        assert operations == [
+            "scan-start",
+            "scan-end",
+            ("connect-start", "AA:01"),
+            ("connect-end", "AA:01"),
+            "scan-start",
+            "scan-end",
+            ("connect-start", "AA:02"),
+            ("connect-end", "AA:02"),
+        ]
+    finally:
+        await first.shutdown()
+        await second.shutdown()
+
+
 def test_second_light_selection_excludes_first_address() -> None:
     config = AppSettings(light_address="AA:01", light_2_address="AA:02")
     second = LightAdapter(
@@ -194,4 +302,18 @@ def test_unconfigured_second_light_does_not_select_first_address() -> None:
         DiscoveredLight("NEEWER-RGB660 PRO", "AA:02", -50),
     ]
 
+    assert second._select(devices).address == "AA:02"
+
+
+def test_duplicate_saved_address_does_not_override_other_panel_exclusion() -> None:
+    config = AppSettings(light_address="AA:01", light_2_address="AA:01")
+    second = LightAdapter(
+        config,
+        address_attribute="light_2_address",
+        excluded_addresses=lambda: {config.light_address},
+    )
+    devices = [
+        DiscoveredLight("NEEWER-RGB660 PRO", "AA:01", -20),
+        DiscoveredLight("NEEWER-RGB660 PRO", "AA:02", -50),
+    ]
     assert second._select(devices).address == "AA:02"

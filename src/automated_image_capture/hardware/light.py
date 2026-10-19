@@ -6,6 +6,7 @@ import inspect
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
@@ -19,6 +20,35 @@ from automated_image_capture.models import (
 from automated_image_capture.settings import AppSettings
 
 LIGHT_COMMAND_TIMEOUT_SECONDS = 3.0
+LIGHT_CONNECT_TIMEOUT_SECONDS = 15.0
+LIGHT_DISCONNECT_TIMEOUT_SECONDS = 5.0
+_connection_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+
+
+def _connection_lock() -> asyncio.Lock:
+    """Serialize discovery/connection of both panels on the shared BLE radio."""
+    loop = asyncio.get_running_loop()
+    if loop not in _connection_locks:
+        _connection_locks[loop] = asyncio.Lock()
+    return _connection_locks[loop]
+
+
+def _connection_error_text(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError):
+        return "Zeitüberschreitung beim Bluetooth-Verbindungsaufbau zum Panel."
+    detail = str(exc) or type(exc).__name__
+    if "unreachable" in detail.casefold() or "Characteristic" in detail:
+        return (
+            "Panel gefunden, aber der Bluetooth-GATT-Zugriff ist fehlgeschlagen. "
+            "Smartphone-App trennen, Panel neu starten und gegebenenfalls die "
+            "gespeicherte Windows-Kopplung des Panels entfernen. Details: " + detail
+        )
+    return detail
+
+
+async def _disconnect_light(light: Any) -> None:
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(light.disconnect(), timeout=LIGHT_DISCONNECT_TIMEOUT_SECONDS)
 
 
 def _attribute(value: Any, name: str, default: Any = None) -> Any:
@@ -90,8 +120,14 @@ class LightAdapter(DeviceAdapter):
             ConnectionState.CONNECTED,
         }:
             return
+        if self._reconnect_task is not None:
+            self._reconnect_task.cancel()
+            self._reconnect_task = None
         self._desired_connection = True
+        self._set_state(ConnectionState.DISCOVERING)
         self._operation_task = self._start_task(self._discover_and_connect())
+        if self._operation_task is None:
+            self._set_state(ConnectionState.ERROR)
 
     async def _scan(self) -> list[DiscoveredLight]:
         from neewerlite import NeewerScanner
@@ -104,11 +140,14 @@ class LightAdapter(DeviceAdapter):
 
     def _select(self, devices: list[DiscoveredLight]) -> DiscoveredLight:
         preferred_address = str(getattr(self.config, self.address_attribute, ""))
+        excluded = {address.casefold() for address in self._excluded_addresses() if address}
         if preferred_address:
             for device in devices:
-                if device.address.casefold() == preferred_address.casefold():
+                if (
+                    device.address.casefold() == preferred_address.casefold()
+                    and device.address.casefold() not in excluded
+                ):
                     return device
-        excluded = {address.casefold() for address in self._excluded_addresses() if address}
         supported = [
             device
             for device in devices
@@ -124,16 +163,17 @@ class LightAdapter(DeviceAdapter):
     async def _discover_and_connect(self) -> None:
         try:
             self._set_state(ConnectionState.DISCOVERING)
-            self._emit_event("Suche fünf Sekunden lang nach BLE-Leuchten …")
-            devices = await self._scan()
-            self.devices_discovered.emit(devices)
-            selected = self._select(devices)
-            await self._connect_selected(selected)
+            async with _connection_lock():
+                self._emit_event("Suche fünf Sekunden lang nach BLE-Leuchten …")
+                devices = await self._scan()
+                self.devices_discovered.emit(devices)
+                selected = self._select(devices)
+                await self._connect_selected(selected)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._set_state(ConnectionState.ERROR)
-            self._emit_error(str(exc) or type(exc).__name__)
+            self._emit_error(_connection_error_text(exc))
             self._schedule_reconnect()
 
     async def _connect_selected(self, selected: DiscoveredLight) -> None:
@@ -148,7 +188,13 @@ class LightAdapter(DeviceAdapter):
         # BLEDevice and can use its backend-specific details for the connection.
         connection_target = selected.raw if selected.raw is not None else selected.address
         light = NeewerLight(connection_target, name=profile_name)
-        await light.connect()
+        try:
+            await asyncio.wait_for(light.connect(), timeout=LIGHT_CONNECT_TIMEOUT_SECONDS)
+        except (Exception, asyncio.CancelledError):
+            # neewerlite 0.3.3 does not release its client on cancellation. In
+            # particular, Disconnect during Connect used to leave a GATT session.
+            await _disconnect_light(light)
+            raise
         self._light = light
         self._command_busy = False
         self._status.name = selected.name
@@ -164,19 +210,36 @@ class LightAdapter(DeviceAdapter):
 
     def disconnect(self) -> None:
         self._desired_connection = False
-        if self._reconnect_task is not None:
-            self._reconnect_task.cancel()
-            self._reconnect_task = None
-        if self._operation_task is not None and not self._operation_task.done():
-            self._operation_task.cancel()
+        pending = [
+            task
+            for task in (self._operation_task, self._reconnect_task)
+            if task is not None and not task.done()
+        ]
+        for task in pending:
+            task.cancel()
         self._command_busy = False
-        self._operation_task = self._start_task(self.disconnect_async())
+
+        async def finish_disconnect() -> None:
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            await self.disconnect_async()
+
+        self._operation_task = self._start_task(finish_disconnect())
 
     async def disconnect_async(self) -> None:
+        current = asyncio.current_task()
+        pending = [
+            task
+            for task in (self._operation_task, self._reconnect_task)
+            if task is not None and task is not current and not task.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         light, self._light = self._light, None
         if light is not None:
-            with contextlib.suppress(Exception):
-                await light.disconnect()
+            await _disconnect_light(light)
         self._status.connected = False
         self._status.values_are_confirmed_commands = False
         self._command_busy = False
@@ -189,9 +252,9 @@ class LightAdapter(DeviceAdapter):
         for task in (self._operation_task, self._reconnect_task):
             if task is not None and not task.done():
                 task.cancel()
+        await self.disconnect_async()
         self._operation_task = None
         self._reconnect_task = None
-        await self.disconnect_async()
 
     def _check_connection(self) -> None:
         if self._light is None or self.state is not ConnectionState.CONNECTED:
@@ -200,6 +263,7 @@ class LightAdapter(DeviceAdapter):
         connected = bool(client is not None and _attribute(client, "is_connected", False))
         if connected is False:
             self._status.connected = False
+            self._status.values_are_confirmed_commands = False
             self.status_changed.emit(self._status)
             self._set_state(ConnectionState.ERROR)
             self._emit_error("Bluetooth-Verbindung zum Panel wurde unterbrochen.")
@@ -218,14 +282,17 @@ class LightAdapter(DeviceAdapter):
         while self._desired_connection and self._light is None:
             await asyncio.sleep(delay)
             try:
-                devices = await self._scan()
-                selected = self._select(devices)
-                await self._connect_selected(selected)
+                async with _connection_lock():
+                    self._set_state(ConnectionState.DISCOVERING)
+                    devices = await self._scan()
+                    selected = self._select(devices)
+                    await self._connect_selected(selected)
                 return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._emit_event(f"Wiederverbindung fehlgeschlagen: {exc}")
+                self._set_state(ConnectionState.ERROR)
+                self._emit_event(f"Wiederverbindung fehlgeschlagen: {_connection_error_text(exc)}")
                 delay = min(delay * 2.0, 30.0)
 
     def set_power(self, enabled: bool) -> None:

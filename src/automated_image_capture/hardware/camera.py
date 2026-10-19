@@ -5,6 +5,7 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 
 import cv2
@@ -227,7 +228,19 @@ class CameraWorker(QObject):
         self._stop = threading.Event()
         self._capture_stream_enabled = threading.Event()
         self._capture_interval = 0.0
+        self._capture_consumer: Callable[[CameraFrame], None] | None = None
         self._exposure_commands: queue.Queue[float | None] = queue.Queue()
+
+    def set_capture_frame_consumer(self, consumer: Callable[[CameraFrame], None] | None) -> None:
+        """The consumer runs in the camera thread and must only hand off the frame."""
+        self._capture_consumer = consumer
+
+    def _publish_capture_frame(self, frame: CameraFrame) -> None:
+        consumer = self._capture_consumer
+        if consumer is not None:
+            consumer(frame)
+        else:
+            self.capture_frame_ready.emit(frame)
 
     def enqueue_exposure(self, exposure_time_us: float) -> None:
         self._exposure_commands.put(float(exposure_time_us))
@@ -495,7 +508,7 @@ class CameraWorker(QObject):
                         next_capture = advance_frame_deadline(
                             next_capture, self._capture_interval, now
                         )
-                        self.capture_frame_ready.emit(
+                        self._publish_capture_frame(
                             CameraFrame(capture_image, fmt, frame_timestamp)
                         )
                     if preview_image is not None:
@@ -645,6 +658,7 @@ class CameraAdapter(DeviceAdapter):
         self.config = config
         self._thread: QThread | None = None
         self._worker: CameraWorker | None = None
+        self._capture_consumer: Callable[[CameraFrame], None] | None = None
         self._status = CameraStatus()
 
     def connect(self) -> None:
@@ -652,6 +666,7 @@ class CameraAdapter(DeviceAdapter):
             return
         self._thread = QThread(self)
         self._worker = CameraWorker(self.config)
+        self._worker.set_capture_frame_consumer(self._capture_consumer)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.state_changed.connect(self._set_state)
@@ -709,6 +724,11 @@ class CameraAdapter(DeviceAdapter):
         worker = self._worker
         if worker is not None:
             worker.set_capture_stream_enabled(enabled, target_fps)
+
+    def set_capture_frame_consumer(self, consumer: Callable[[CameraFrame], None] | None) -> None:
+        self._capture_consumer = consumer
+        if self._worker is not None:
+            self._worker.set_capture_frame_consumer(consumer)
 
     def disconnect(self) -> None:
         worker, thread = self._worker, self._thread

@@ -40,6 +40,12 @@ TANDEM_CONFIG_VALUES = {
 }
 
 STATUS_SYMBOLS = {
+    "MAIN.GuiConveyorEnabled": "continuous_enabled",
+    "MAIN.GuiConveyorSpeedMmPerSec": "continuous_speed_mm_s",
+    "MAIN.StepperPosBusy": "motion_busy",
+    "MAIN.StepperPosError": "motion_error",
+    "MAIN.ConveyorServo1TargetVelocity": "motor_1_target",
+    "MAIN.ConveyorServo2TargetVelocity": "motor_2_target",
     "MAIN.ConveyorCaptureInterfaceVersion": "capture_interface_version",
     "MAIN.ConveyorServoVelocityOnly": "velocity_only",
     "MAIN.ConveyorServoMotorCount": "motor_count",
@@ -167,6 +173,14 @@ class ConveyorWorker(QObject):
         self._movement_started_at: float | None = None
         self._movement_started_sequence: int | None = None
         self._completion_feedback_wait_started: float | None = None
+        self._continuous_requested = False
+        self._continuous_deadline = 0.0
+
+    def enqueue_continuous(self, speed_mm_s: float) -> None:
+        self._commands.put(("continuous_start", speed_mm_s))
+
+    def enqueue_speed(self, speed_mm_s: float) -> None:
+        self._commands.put(("continuous_speed", speed_mm_s))
 
     def enqueue_move(self, move: ConveyorMove) -> None:
         self._commands.put(("move", move))
@@ -269,6 +283,7 @@ class ConveyorWorker(QObject):
 
     def _handle_command(self, plc: Any, command: str, payload: object | None, pyads: Any) -> None:
         if command == "stop":
+            self._continuous_requested = False
             self._write_values(plc, self._safe_values(), pyads)
             self._requested_move = None
             self._move_command_sent = False
@@ -279,6 +294,7 @@ class ConveyorWorker(QObject):
             self._cancel_motion.clear()
             return
         if command == "release":
+            self._continuous_requested = False
             self._write_values(plc, self._safe_values(), pyads)
             self._requested_move = None
             self._saw_busy = False
@@ -289,9 +305,40 @@ class ConveyorWorker(QObject):
             self.event_message.emit("Förderbandsteuerung freigegeben und gestoppt.")
             self._cancel_motion.clear()
             return
+        if command in {"continuous_start", "continuous_speed"}:
+            try:
+                speed = float(payload)
+                if not 0.1 <= speed <= MAX_BELT_SPEED_MM_S:
+                    raise ValueError("Bandgeschwindigkeit muss zwischen 0,1 und 200 mm/s liegen.")
+                if command == "continuous_start":
+                    if self._requested_move is not None or self._continuous_requested:
+                        raise RuntimeError("Eine Förderbandfahrt ist bereits aktiv.")
+                    self._prepare_tandem(plc, pyads)
+                    if self._cancel_motion.is_set() or self._stop.is_set():
+                        raise RuntimeError("Dauerlaufvorbereitung abgebrochen.")
+                    self._write_values(
+                        plc,
+                        {
+                            "MAIN.GuiConveyorSpeedMmPerSec": speed,
+                            "MAIN.GuiConveyorCalibrationMode": False,
+                            "MAIN.GuiConveyorEnabled": True,
+                        },
+                        pyads,
+                    )
+                    self._continuous_requested = True
+                    self._continuous_deadline = time.monotonic() + DRIVE_ENABLE_TIMEOUT_SECONDS
+                elif self._continuous_requested and not self._cancel_motion.is_set():
+                    self._write_values(plc, {"MAIN.GuiConveyorSpeedMmPerSec": speed}, pyads)
+                else:
+                    raise RuntimeError("Kein aktiver Dauerlauf.")
+            except Exception as exc:
+                self._write_values(plc, self._safe_values(), pyads)
+                self._continuous_requested = False
+                self.error.emit(str(exc))
+            return
         if command != "move" or not isinstance(payload, ConveyorMove):
             return
-        if self._requested_move is not None:
+        if self._requested_move is not None or self._continuous_requested:
             raise RuntimeError("Eine Förderbandfahrt ist bereits aktiv.")
         self._requested_move = payload
         try:
@@ -435,8 +482,19 @@ class ConveyorWorker(QObject):
                         mm_per_full_step=float(values["MAIN.GuiConveyorMmPerFullStep"]),
                         ready_to_execute=bool(values["MAIN.StepperPosReadyToExecute"]),
                         warning=bool(values["MAIN.StepperPosWarning"]),
-                        busy=bool(values["MAIN.CalibrationBusy"]),
-                        error=bool(values["MAIN.CalibrationError"]),
+                        busy=bool(values["MAIN.CalibrationBusy"] or values["MAIN.StepperPosBusy"]),
+                        error=bool(
+                            values["MAIN.CalibrationError"] or values["MAIN.StepperPosError"]
+                        ),
+                        continuous_requested=self._continuous_requested,
+                        continuous_running=(
+                            self._continuous_requested
+                            and bool(values["MAIN.GuiConveyorEnabled"])
+                            and bool(values["MAIN.StepperPosBusy"])
+                            and int(values["MAIN.ConveyorServo1TargetVelocity"]) != 0
+                            and int(values["MAIN.ConveyorServo2TargetVelocity"]) != 0
+                        ),
+                        continuous_speed_mm_s=float(values["MAIN.GuiConveyorSpeedMmPerSec"]),
                         status_code=int(values["MAIN.CalibrationStatusCode"]),
                         internal_position=int(values["MAIN.StepperInternalPosition"]),
                         conveyor_reverse=bool(values["MAIN.GuiConveyorReverse"]),
@@ -470,6 +528,22 @@ class ConveyorWorker(QObject):
                     if status.busy or status.status_code in {1, 2}:
                         self._saw_busy = True
                         self._completion_feedback_wait_started = None
+                    if self._continuous_requested:
+                        if (
+                            status.error
+                            or status.servo_fault_code
+                            or (
+                                not status.continuous_running
+                                and time.monotonic() > self._continuous_deadline
+                            )
+                        ):
+                            self._write_values(plc, self._safe_values(), pyads)
+                            self._continuous_requested = False
+                            status.continuous_requested = False
+                            status.continuous_running = False
+                            self.error.emit(
+                                "Förderband-Dauerlauf wurde nicht bestätigt oder ist ausgefallen."
+                            )
                     if self._requested_move is not None:
                         if status.error or status.status_code in {4, 5}:
                             failed = self._requested_move
@@ -569,6 +643,12 @@ class ConveyorWorker(QObject):
                     self.state_changed.emit(ConnectionState.CONNECTED)
                     last_error = ""
                 except Exception as exc:
+                    if self._continuous_requested:
+                        self._continuous_requested = False
+                        try:
+                            self._write_values(plc, self._safe_values(), pyads)
+                        except Exception:
+                            pass
                     message = f"ADS-Lese-/Schreibfehler oder fehlendes SPS-Symbol: {exc}"
                     if message != last_error:
                         self.error.emit(message)
@@ -580,7 +660,9 @@ class ConveyorWorker(QObject):
                     plc = None
                     self.state_changed.emit(ConnectionState.ERROR)
                 self._stop.wait(
-                    ACTIVE_POLL_SECONDS if self._requested_move is not None else IDLE_POLL_SECONDS
+                    ACTIVE_POLL_SECONDS
+                    if self._requested_move is not None or self._continuous_requested
+                    else IDLE_POLL_SECONDS
                 )
         except Exception as exc:
             self.state_changed.emit(ConnectionState.ERROR)
@@ -855,6 +937,38 @@ class ConveyorAdapter(DeviceAdapter):
     def stop_motion(self) -> None:
         if self._worker is not None:
             self._worker.enqueue_stop()
+
+    def start_continuous(self, speed_mm_s: float) -> bool:
+        worker = self._ready_worker()
+        if worker is None:
+            return False
+        if (
+            not 0.1 <= speed_mm_s <= MAX_BELT_SPEED_MM_S
+            or self.config.conveyor_forward_direction != "right"
+            or self._status.busy
+            or self._status.preparing_drive
+            or self._status.requested_sequence is not None
+            or self._status.continuous_requested
+        ):
+            self._emit_error(
+                "Dauerlauf benötigt Stillstand, Vorwärtsrichtung Rechts und 0,1–200 mm/s."
+            )
+            return False
+        self._status.continuous_requested = True
+        self._status.preparing_drive = True
+        self.status_changed.emit(replace(self._status))
+        worker.enqueue_continuous(speed_mm_s)
+        return True
+
+    def set_continuous_speed(self, speed_mm_s: float) -> bool:
+        worker = self._ready_worker()
+        if worker is None or not self._status.continuous_running:
+            return False
+        if not 0.1 <= speed_mm_s <= MAX_BELT_SPEED_MM_S:
+            self._emit_error("Bandgeschwindigkeit muss zwischen 0,1 und 200 mm/s liegen.")
+            return False
+        worker.enqueue_speed(speed_mm_s)
+        return True
 
     def release_control(self) -> None:
         if self._worker is not None:
