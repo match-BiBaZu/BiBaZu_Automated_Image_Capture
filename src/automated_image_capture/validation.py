@@ -259,12 +259,13 @@ class ValidationTracker:
         self._timestamp = timestamp
         first_result = len(self.results)
         for tid, track in list(self.tracks.items()):
-            if timestamp - track.last_seen > self.settings.max_gap_s:
-                self._finish(track, timestamp, "Erkennung verloren", incomplete=True)
-                # A briefly lost, already sealed identity must not be born again
-                # in the entry area and counted as another physical part.
-                if timestamp - track.last_seen >= self.settings.max_gap_s + 1.5:
-                    del self.tracks[tid]
+            # Retire old sealed identities, but associate this frame before
+            # declaring an open track lost. The current OBB may show its exit.
+            if (
+                track.finalized
+                and timestamp - track.last_seen >= self.settings.max_gap_s + 1.5
+            ):
+                del self.tracks[tid]
         valid = suppress_duplicates(detections)
         tracks = list(self.tracks.values())
         assigned: set[int] = set()
@@ -338,6 +339,12 @@ class ValidationTracker:
             self._next_id += 1
             self.tracks[track.track_id] = track
             self._vote(track, image, timestamp)
+        for tid, track in list(self.tracks.items()):
+            if timestamp - track.last_seen > self.settings.max_gap_s:
+                self._finish(track, timestamp, "Erkennung verloren", incomplete=True)
+                # Keep a sealed identity briefly to prevent a second count.
+                if timestamp - track.last_seen >= self.settings.max_gap_s + 1.5:
+                    del self.tracks[tid]
         return self.results[first_result:]
 
     def stop(self, timestamp: float, reason: str = "Gestoppt") -> list[ValidationResult]:

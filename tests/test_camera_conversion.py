@@ -16,11 +16,65 @@ from automated_image_capture.hardware.camera import (
     capture_to_rgb,
     convert_for_capture,
     convert_to_rgb,
+    fetch_camera_buffer,
     is_camera_fetch_timeout,
     should_retry_camera_fetch,
 )
 from automated_image_capture.models import CameraFrame
 from automated_image_capture.settings import AppSettings
+
+
+def test_camera_polling_yields_until_buffer_arrives_and_returns_it_unchanged():
+    expected = object()
+    responses = iter((None, None, expected))
+    polls, waits = [], []
+
+    class Acquirer:
+        def try_fetch(self, *, timeout):
+            polls.append(timeout)
+            return next(responses)
+
+    class Stop:
+        def is_set(self):
+            return False
+
+        def wait(self, duration):
+            waits.append(duration)
+            return False
+
+    assert fetch_camera_buffer(Acquirer(), 0.5, Stop()) is expected
+    assert len(polls) == 3 and all(0 < interval <= 0.002 for interval in polls)
+    assert len(waits) == 2 and all(0 < interval <= 0.001 for interval in waits)
+
+
+def test_camera_polling_honors_overall_timeout_and_does_not_hide_device_errors():
+    class Acquirer:
+        def try_fetch(self, *, timeout):
+            return None
+
+    with pytest.raises(TimeoutError):
+        fetch_camera_buffer(Acquirer(), 0.01, threading.Event())
+
+    class FailedAcquirer:
+        def try_fetch(self, *, timeout):
+            raise RuntimeError("Kamera getrennt")
+
+    with pytest.raises(RuntimeError, match="Kamera getrennt"):
+        fetch_camera_buffer(FailedAcquirer(), 0.5, threading.Event())
+
+
+def test_camera_polling_stops_between_short_native_waits():
+    stopped = threading.Event()
+    polls = []
+
+    class Acquirer:
+        def try_fetch(self, *, timeout):
+            polls.append(timeout)
+            stopped.set()
+            return None
+
+    assert fetch_camera_buffer(Acquirer(), 0.5, stopped) is None
+    assert len(polls) == 1
 
 
 def test_direct_capture_consumer_does_not_need_gui_events_and_restores_capture_signal(qtbot):

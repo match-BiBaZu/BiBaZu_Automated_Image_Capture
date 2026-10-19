@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -518,6 +519,7 @@ class MainWindow(QMainWindow):
             )
 
     def _inference_frame(self, frame: InferenceFrame) -> None:
+        started = time.perf_counter()
         self.validation.on_frame(frame)
         image = frame.image
         height, width, channels = image.shape
@@ -534,7 +536,16 @@ class MainWindow(QMainWindow):
         count = len(frame.detections)
         detection_text = "1 Objekt" if count == 1 else f"{count} Objekte"
         self.inference_status.setText(f"{detection_text} · {frame.inference_ms:.0f} ms")
+        if frame.timings:
+            self.inference_status.setToolTip(
+                f"Bildzulauf: {frame.timings.get('input_fps', 0):.1f} FPS\n"
+                f"Farbumwandlung: {frame.timings.get('convert_ms', 0):.1f} ms\n"
+                f"YOLO-Aufruf: {frame.timings.get('predict_ms', 0):.1f} ms\n"
+                f"Modellberechnung: {frame.timings.get('backend_inference_ms', 0):.1f} ms"
+            )
         self._render_image()
+        if self.validation.running:
+            self.validation.performance["last_gui_ms"] = (time.perf_counter() - started) * 1000
 
     def _inference_frame_from(
         self,

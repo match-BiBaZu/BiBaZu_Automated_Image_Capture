@@ -21,9 +21,26 @@ keinen Roboter und kein Roboterprogramm.
 Der Reiter verwendet dieselbe Modellauswahl und denselben Inferenzworker wie die
 Liveerkennung. `InferenceModelInfo` meldet beim Laden Dateipfad, SHA-256, Modelltyp
 und Klassenliste. `InferenceFrame.raw_image` liefert zusätzlich das unveränderte
-RGB-Bild für Belege. Für die Validation wird der separate `capture_frame_ready`-Pfad
+RGB-Bild für Belege. Für die Validation wird der separate Aufnahmebildpfad
 mit dem gewählten Inferenzlimit aktiviert; Vorschau-FPS begrenzen diesen Pfad nicht.
-Inferenz und Kamera behalten keine Warteschlange alter Bilder.
+Ein direkter Consumer übergibt das bereits kopierte Kamerabild im Kamerathread an
+den threadsicheren neuesten-Bild-Slot des Inferenzworkers. Dabei erfolgen weder
+GUI-Aufrufe noch Farbkonvertierungen. Erst nach Auswahl des neuesten Bildes wandelt
+der Inferenzworker Mono8 in drei Kanäle um; für RGB→BGR verwendet er OpenCV statt
+einer langsamen NumPy-Kanalkopie. Der GUI-Ereignispfad kann so keine Warteschlange
+alter Validierungsbilder erzeugen. Nach Stop wird der Consumer entfernt; die
+automatische Aufnahme verwendet weiterhin das vollständige `capture_frame_ready`-Signal.
+`InferenceFrame.timings` erfasst Bildzulauf, Farbkonvertierung, Modellaufruf,
+Backend-Zeiten und Overlay. Während der Validation stehen zusätzlich Bildalter,
+Tracking und letzte GUI-Verarbeitungszeit unter `performance` in `session.json`.
+Das Dashboard-Log schreibt alle fünf Sekunden eine Zeile `Validation-Leistung`;
+ein Tooltip am YOLO-Status zeigt wesentliche aktuelle Werte.
+Der GenTL-Abruf verwendet kurze native Wartezeiten (1 ms) und `try_fetch`-Abschnitte
+von höchstens 2 ms mit kooperativer Pause. Das vermeidet lange native Warteaufrufe,
+die bei der verwendeten GenICam-Anbindung den GIL halten und dadurch den
+Inferenzthread ausbremsen können (vgl. [Harvester #508](https://github.com/genicam/harvesters/issues/508)).
+Die gesamte Abruffrist bleibt von der Belichtungszeit abhängig; leere kurze Polls
+gelten nicht als Stream-Ausfall. Stop und die bisherige Ausfallbehandlung bleiben wirksam.
 Der Inferenzlimiter berechnet und prüft seine Deadlines ausschließlich mit
 `time.monotonic()`. `time.perf_counter()` dient nur zur Laufzeitmessung: Unter
 Python 3.12/Windows können die Zeitgeber unterschiedliche Bezugspunkte haben.
@@ -46,6 +63,11 @@ benötigt standardmäßig fünf Beobachtungen, 0,25 s Beobachtungsdauer und 70 %
 Die Abschlussbeobachtung selbst wird ausgeschlossen. Alle verlorenen Tracks
 werden nach 0,5 s unvollständig abgeschlossen und noch bis zu 1,5 s länger als
 gesperrte Identität gehalten, um kurzfristiges Wiederauftauchen nicht erneut zu zählen.
+Die Aussetzerfrist wird nach der Zuordnung des aktuellen Bildes geprüft. Eine
+geometrisch eindeutig zugeordnete OBB an der Abschlusslinie schließt den Track
+deshalb regulär aus den vorherigen Stimmen ab, auch wenn das aktuelle Bild verspätet
+eintrifft. Bereits als verloren abgeschlossene Tracks werden nicht nachträglich
+erfolgreich gezählt; fehlende oder geometrisch unpassende Erkennungen bleiben unvollständig.
 Jeder im Eintrittsbereich angelegte Track wird abgeschlossen, auch bei nur einem
 Treffer oder ohne gültige Klassenstimme. Es gibt keinen stillen Mindesttrefferfilter.
 `reason` benennt Einzel-Erkennung, fehlende gültige Beobachtungen, mehrdeutige

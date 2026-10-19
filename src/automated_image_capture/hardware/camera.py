@@ -24,6 +24,26 @@ MAX_STREAM_RESTART_ATTEMPTS = 2
 # Kept for callers of the small retry-policy helper. The worker itself uses
 # elapsed time, because a long exposure also increases the individual fetch timeout.
 MAX_CONSECUTIVE_FETCH_TIMEOUTS = 10
+NATIVE_FETCH_TIMEOUT_MS = 1
+FETCH_POLL_SECONDS = 0.002
+FETCH_YIELD_SECONDS = 0.001
+
+
+def fetch_camera_buffer(acquirer: Any, timeout: float, stop: threading.Event) -> Any:
+    """Wait cooperatively; a blocking GenTL EventGetData may retain Python's GIL."""
+    deadline = time.monotonic() + timeout
+    while not stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Kein Kamerabuffer innerhalb der Abruffrist.")
+        buffer = acquirer.try_fetch(timeout=min(FETCH_POLL_SECONDS, remaining))
+        if buffer is not None:
+            return buffer
+        # Unlike the native wait, Event.wait releases the GIL so YOLO, ADS and
+        # GUI callbacks can proceed even while the camera is awaiting a frame.
+        if stop.wait(min(FETCH_YIELD_SECONDS, max(0.0, deadline - time.monotonic()))):
+            break
+    return None
 
 
 def advance_frame_deadline(deadline: float, interval: float, now: float) -> float:
@@ -388,6 +408,7 @@ class CameraWorker(QObject):
             )
             self.status_changed.emit(status)
 
+            acquirer.timeout_period_on_update_event_data_call = NATIVE_FETCH_TIMEOUT_MS
             acquirer.start()
             self.state_changed.emit(ConnectionState.CONNECTED)
             self.event_message.emit("Liveaufnahme gestartet.")
@@ -460,7 +481,10 @@ class CameraWorker(QObject):
                     fetch_timeout = camera_fetch_timeout_seconds(status.exposure_time_us)
                     capture_image: np.ndarray | None = None
                     preview_image: np.ndarray | None = None
-                    with acquirer.fetch(timeout=fetch_timeout) as buffer:
+                    fetched = fetch_camera_buffer(acquirer, fetch_timeout, self._stop)
+                    if fetched is None:
+                        break
+                    with fetched as buffer:
                         if stream_degraded:
                             self.state_changed.emit(ConnectionState.CONNECTED)
                             self.event_message.emit(

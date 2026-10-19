@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -178,6 +179,7 @@ class LiveInferenceWorker(QThread):
         self._model_factory = model_factory
         self._condition = threading.Condition()
         self._latest_frame: tuple[np.ndarray, float] | None = None
+        self._submissions: deque[float] = deque(maxlen=60)
         self._stopping = False
 
     def submit(self, image: np.ndarray, timestamp: float | None = None) -> None:
@@ -185,6 +187,7 @@ class LiveInferenceWorker(QThread):
             return
         with self._condition:
             self._latest_frame = (image, time.time() if timestamp is None else timestamp)
+            self._submissions.append(time.monotonic())
             self._condition.notify()
 
     def update_runtime_settings(self, confidence: float, max_fps: float) -> None:
@@ -241,6 +244,12 @@ class LiveInferenceWorker(QThread):
                     image, timestamp = self._latest_frame
                     self._latest_frame = None
                     config = self._config
+                    input_fps = (
+                        (len(self._submissions) - 1)
+                        / max(1e-6, self._submissions[-1] - self._submissions[0])
+                        if len(self._submissions) >= 2
+                        else 0.0
+                    )
 
                 # Deadlines must use the same clock as the wait loop. On Python
                 # 3.12/Windows perf_counter and monotonic can have different epochs.
@@ -267,6 +276,8 @@ class LiveInferenceWorker(QThread):
                 annotated = draw_obb_overlay(image, detections)
                 overlaid = time.perf_counter()
                 timings = {
+                    "input_fps": input_fps,
+                    "limit_fps": config.max_fps,
                     "convert_ms": (converted - started) * 1000,
                     "predict_ms": (predicted - converted) * 1000,
                     "extract_ms": (extracted - predicted) * 1000,

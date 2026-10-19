@@ -161,6 +161,7 @@ class ValidationController(QObject):
             "inference_ms": frame.inference_ms,
             "frame_age_ms": max(0.0, time.time() - frame.timestamp) * 1000,
             "fps": self.fps,
+            "last_gui_ms": self.performance.get("last_gui_ms", 0.0),
         }
         if self._last_frame - self._last_performance_log >= 5:
             self._last_performance_log = self._last_frame
@@ -179,7 +180,9 @@ class ValidationController(QObject):
                     raise RuntimeError("Der Förderband-Dauerlauf konnte nicht angefordert werden.")
             elif self.state == "running" and self.tracker is not None:
                 image = frame.raw_image if frame.raw_image is not None else frame.image
+                tracking_started = time.perf_counter()
                 results = self.tracker.update(image, frame.detections, frame.timestamp)
+                self.performance["tracking_ms"] = (time.perf_counter() - tracking_started) * 1000
                 if results:
                     self.store.save(results, self.snapshot())
                 self.message = (

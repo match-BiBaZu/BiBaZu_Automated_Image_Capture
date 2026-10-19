@@ -73,6 +73,54 @@ def test_leftmost_corner_crosses_before_center_and_crossing_vote_is_excluded():
     assert tracker.results == [result]
 
 
+def test_delayed_crossing_frame_is_matched_before_track_loss_timeout():
+    tracker = ValidationTracker(ValidationSettings(exit_fraction=0.35), CLASSES)
+    for step in range(12):
+        tracker.update(IMAGE, (detection(900 - 40 * step, 2),), step * 0.1)
+    assert tracker.tracks[1].observations == 12
+    # A processing stall lasts longer than max_gap_s. The next observed frame
+    # still contains the uniquely matching part, now beyond the exit line.
+    result = tracker.update(IMAGE, (detection(220, 1),), 1.7)
+    assert len(result) == 1
+    assert result[0].status == "Erkannt" and result[0].class_id == 2
+    assert result[0].observations == 12 and result[0].consensus == 1
+    assert result[0].reason == "Abschlusslinie"
+    tracker.update(IMAGE, (detection(180, 1),), 1.8)
+    tracker.stop(2)
+    assert tracker.results == result
+
+
+def test_delayed_exit_frame_keeps_two_parts_separate():
+    tracker = ValidationTracker(ValidationSettings(exit_fraction=0.35), CLASSES)
+    for step in range(12):
+        tracker.update(
+            IMAGE,
+            (detection(900 - 40 * step, 2), detection(900 - 40 * step, 0, y=280)),
+            step * 0.1,
+        )
+    results = tracker.update(IMAGE, (detection(220, 1, y=280), detection(220, 1)), 1.7)
+    assert [(r.track_id, r.class_id, r.status) for r in results] == [
+        (1, 2, "Erkannt"), (2, 0, "Erkannt")
+    ]
+    assert all(r.observations == 12 and r.consensus == 1 for r in results)
+
+
+def test_stable_votes_do_not_override_actual_loss_or_wrong_geometry():
+    for actual_missing_frame in (False, True):
+        tracker = ValidationTracker(ValidationSettings(exit_fraction=0.35), CLASSES)
+        for step in range(12):
+            tracker.update(IMAGE, (detection(900 - 40 * step, 2),), step * 0.1)
+        if actual_missing_frame:
+            tracker.update(IMAGE, (), 1.7)
+            tracker.update(IMAGE, (detection(180, 2),), 1.8)
+        else:
+            tracker.update(IMAGE, (detection(220, 2, y=280),), 1.7)
+        assert len(tracker.results) == 1
+        assert tracker.results[0].status == "Unvollständig"
+        assert tracker.results[0].observations == 12
+        assert tracker.pose_counts() == {0: 0, 1: 0, 2: 0}
+
+
 def test_short_gap_bridges_but_lost_part_cannot_restart_in_middle():
     tracker = ValidationTracker(ValidationSettings(), CLASSES)
     tracker.update(IMAGE, (detection(900),), 1)
