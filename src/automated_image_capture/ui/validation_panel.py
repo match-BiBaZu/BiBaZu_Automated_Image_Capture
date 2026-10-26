@@ -159,6 +159,10 @@ class ValidationPanel(QWidget):
         self.entry.setRange(5.01, 99.99)
         self.entry.setValue(75)
         self.entry.setSuffix(" % vom linken Rand")
+        self.entry.setToolTip(
+            "Die Auswertung beginnt, sobald die rechteste OBB-Ecke diese Linie "
+            "von rechts erreicht oder überschreitet."
+        )
         self.line.valueChanged.connect(self._line_changed)
         self.entry.valueChanged.connect(self._entry_changed)
         form.addRow("Eintrittslinie", self.entry)
@@ -188,8 +192,8 @@ class ValidationPanel(QWidget):
         advanced = QFormLayout(self.parameters)
         self.min_consensus = QDoubleSpinBox()
         self.min_consensus.setDecimals(2)
-        self.min_consensus.setRange(50.01, 99.99)
-        self.min_consensus.setValue(90)
+        self.min_consensus.setRange(50, 99.99)
+        self.min_consensus.setValue(ValidationSettings().min_consensus * 100)
         self.min_consensus.setSuffix(" %")
         self.min_consensus.setToolTip(
             "Häufigste Pose / alle gültigen Erkennungen muss diesen Wert überschreiten."
@@ -290,7 +294,7 @@ class ValidationPanel(QWidget):
         self.speed.setEnabled(controller.state in {"idle", "running"})
         self.export.setEnabled(controller.store is not None)
         tracks = (
-            [t for t in controller.tracker.tracks.values() if not t.finalized]
+            [t for t in controller.tracker.tracks.values() if t.entered and not t.finalized]
             if controller.tracker
             else []
         )

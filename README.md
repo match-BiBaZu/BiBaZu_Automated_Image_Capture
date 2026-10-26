@@ -86,20 +86,28 @@ Aktuelle Fehler, laufende Aufträge und andere Statuscodes werden nicht automati
 5. **Validation starten** startet nach erfolgreicher Kamerainferenz beide Bandmotoren.
    Räumlich getrennte Bauteile rechts ins Bild einlaufen lassen. Bereits mitten im
    Bild liegende Teile werden nicht als neue Durchfahrt übernommen.
+   Die Auswertung eines Bauteils beginnt erst, wenn seine **rechteste OBB-Ecke**
+   die blaue Eintrittslinie von rechts erreicht oder überschreitet. Frühere
+   Erkennungen dienen nur der Bewegungsverfolgung; sie liefern keine Stimmen,
+   Erstbilder oder abgeschlossenen Ergebnisse, auch nicht bei Erkennungsverlust.
 6. Aktuelle Track-IDs und Posenschätzungen sowie abgeschlossene Bauteile und
    Summen beobachten. Eine geänderte Geschwindigkeit gilt nach **Übernehmen**.
 7. **Stop** beendet Validation und Band gemeinsam. Der globale Stop bleibt auch beim
    Wechsel zum Aufnahme-Reiter sichtbar. Automatische Aufnahme und Validation
    können nicht gleichzeitig laufen.
 
-Jedes Bauteil erhält eine eigene Track-ID. Jede gültige, vollständig sichtbare
-Erkennung zählt einmal. Der Erkennungsanteil ist **Anzahl der häufigsten Pose /
-Anzahl aller gültigen Erkennungen**. Bei **mehr als 90 %** wird diese Pose als
-**Erkannt** übernommen und ihr Bauteilzähler erhöht: 91/100 genügt, genau 90/100 nicht.
+Jedes Bauteil erhält eine eigene Track-ID. Jede gültige Erkennung rechts der
+Abschlusslinie zählt einmal. OBBs dürfen den oberen oder unteren Kamerabildrand
+berühren oder überschreiten, solange sie vertikal noch ins Bild reichen. Der rechte
+Bildrand darf weiterhin nicht berührt oder überschritten werden. Der Erkennungsanteil
+ist **Anzahl der häufigsten Pose /
+Anzahl aller gültigen Erkennungen**. Bei **mehr als 50 %** wird diese Pose als
+**Erkannt** übernommen und ihr Bauteilzähler erhöht: 51/100 genügt, genau 50/100 nicht.
 Die Konfidenzen gewichten die Stimmen nicht; es gibt keine zusätzliche Mindestzahl
 oder Mindestdauer. Auch 1/1 ergibt 100 %. **Stimmen / Gesamt** und **Anteil** zeigen
 die Grundlage der Entscheidung. Unter **Erweiterte Auswertung** ist die Schwelle
-anpassbar. Beim Umstieg wird die alte gewichtete Schwelle auf 90 % zurückgesetzt.
+anpassbar. Beim Umstieg von der gewichteten Auswertung oder der bisherigen
+90-%-Voreinstellung wird die Schwelle einmalig auf 50 % gesetzt.
 Ein Klassenwechsel erzeugt keinen neuen Track. Der Erkennungsanteil beschreibt die
 Übereinstimmung der Beobachtungen und ist keine kalibrierte Modellwahrscheinlichkeit.
 
@@ -112,12 +120,13 @@ verhindert eine klare Pose nicht mehr. Dasselbe gilt bei Stop oder Geräteausfal
 Ohne ausreichenden Erkennungsanteil lautet die Pose **Unklar**; ohne gültige Stimmen
 bei abgebrochener Verfolgung **Unvollständig**. Ein wieder auftauchender abgeschlossener
 Track bleibt kurzzeitig gegen erneute Zählung gesperrt und erhält keine neuen Stimmen.
-Auch ein nur einmal erkanntes Teil und ein Teil ohne gültige, vollständig sichtbare
+Auch ein nur einmal erkanntes Teil und ein Teil ohne gültige
 Beobachtung erscheinen in der Liste. Einzel-Erkennungen werden nicht als mögliche
 Fehldetektionen verworfen. Die Spalte **Grund** erklärt den Abschluss; die Übersicht
 zeigt die Gesamtzahl abgeschlossener Tracks einschließlich aller Fehlversuche.
 Alle Fälle sind in Sicherung und Export enthalten. Nur **Erkannt** erhöht einen Posezähler.
-Für jeden neuen Track wird sofort das vollständige erste Erkennungsbild mit OBB,
+Für jeden an der Eintrittslinie begonnenen Track wird sofort das vollständige
+erste Auswertungsbild mit OBB,
 Pose und Konfidenz unter `erstbilder/` gespeichert, auch bei Verdeckung, Randanschnitt
 oder null gültigen Beobachtungen. Doppelklick auf **Erstbild** öffnet es; fehlt ein
 gültiger Posebeleg, öffnet auch der normale Doppelklick dieses Bild. Die ungeprüfte
@@ -136,7 +145,8 @@ Sitzungen werden automatisch unter dem angezeigten Sicherungsordner gespeichert,
 standardmäßig `Pictures\YOLOValidation\validation_…`. **Exportieren …** erzeugt
 einen neuen Unterordner mit `bauteile.csv`, `summen.csv`, `session.json` und
 `bilder/`. CSV verwendet UTF-8 mit BOM und Semikolon. Pro Bauteil wird ein
-vollständig sichtbares Belegbild gesichert; wenn keine solche Beobachtung vorliegt,
+Belegbild einer gültigen Beobachtung gesichert, auch bei Randanschnitt oben oder unten;
+wenn keine solche Beobachtung vorliegt,
 bleibt der Bildverweis leer. Ein Doppelklick auf einen abgeschlossenen Eintrag
 öffnet den Beleg. Laufende Exporte enthalten nur bereits abgeschlossene Bauteile.
 

@@ -877,7 +877,8 @@ class MainWindow(QMainWindow):
             not self.validation.running and not self.acquisition.running
         )
         self.preview.tracks = (
-            list(self.validation.tracker.tracks.values()) if self.validation.tracker else []
+            [t for t in self.validation.tracker.tracks.values() if t.entered]
+            if self.validation.tracker else []
         )
         self.preview.update()
         self.validation_banner.setText(

@@ -129,6 +129,33 @@ def test_live_duplicate_controls_apply_immediately_and_restore(qtbot, tmp_path):
     window._inference_worker = None
 
 
+def test_validation_hides_pre_entry_candidates_until_rightmost_corner_reaches_line(qtbot, tmp_path):
+    from automated_image_capture.inference import InferenceModelInfo
+    from automated_image_capture.validation import ValidationSettings, ValidationTracker
+
+    window = make_window(qtbot, tmp_path)
+    window.validation.set_model(InferenceModelInfo("model.pt", "hash", "obb", {0: "A"}))
+    tracker = ValidationTracker(ValidationSettings(), {0: "A"})
+    window.validation.tracker = tracker
+    image = np.zeros((400, 1000, 3), np.uint8)
+
+    def part(right):
+        return InferenceDetection(
+            0, "A", 0.9, ((right - 50, 100), (right, 100), (right, 150), (right - 50, 150))
+        )
+
+    tracker.update(image, (part(800),), 1)
+    window._refresh_validation()
+    assert window.validation_panel.active.rowCount() == 0
+    assert window.validation_panel.results.rowCount() == 0
+    assert window.preview.tracks == []
+    tracker.update(image, (part(750),), 1.1)
+    window._refresh_validation()
+    assert window.validation_panel.active.rowCount() == 1
+    assert window.preview.tracks == [tracker.tracks[1]]
+    assert window.validation_panel.active.item(0, 0).text() == "1"
+
+
 def test_validation_shows_single_failed_entry_and_failure_totals(qtbot, tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -140,7 +167,7 @@ def test_validation_shows_single_failed_entry_and_failure_totals(qtbot, tmp_path
     tracker = ValidationTracker(ValidationSettings(), {0: "A"})
     window.validation.tracker = tracker
     image = np.zeros((400, 1000, 3), np.uint8)
-    entry = InferenceDetection(0, "A", 0.9, ((960, 100), (1010, 100), (1010, 150), (960, 150)))
+    entry = InferenceDetection(0, "A", 0.9, ((700, -50), (750, -50), (750, -10), (700, -10)))
     tracker.update(image, (entry,), 1)
     tracker.update(image, (), 1.6)
     window._refresh_validation()
@@ -206,7 +233,7 @@ def test_validation_counts_majority_pose_after_loss_and_shows_vote_numbers(qtbot
 
     window = make_window(qtbot, tmp_path)
     window.validation.set_model(InferenceModelInfo("model.pt", "hash", "obb", {4: "Pose 4"}))
-    tracker = ValidationTracker(ValidationSettings(), {4: "Pose 4"})
+    tracker = ValidationTracker(ValidationSettings(entry_fraction=0.925), {4: "Pose 4"})
     window.validation.tracker = tracker
     image = np.zeros((400, 1000, 3), np.uint8)
     for step in range(12):
@@ -225,7 +252,9 @@ def test_validation_counts_majority_pose_after_loss_and_shows_vote_numbers(qtbot
     assert tracker.pose_counts() == {4: 1}
     assert "Erkannt: 1" in panel.summary.text()
     assert not tracker.results[0].pass_completed
-    assert window.validation_panel.min_consensus.value() == 90
+    assert window.validation_panel.min_consensus.value() == 50
+    assert window.validation_panel.min_consensus.minimum() == 50
+    assert window.validation_panel.settings().min_consensus == 0.5
 
 
 def test_validation_camera_uses_mono_capture_stream_independent_of_preview(qtbot, tmp_path):

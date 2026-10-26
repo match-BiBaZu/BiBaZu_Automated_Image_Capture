@@ -18,7 +18,7 @@ from automated_image_capture.inference import (
     suppress_duplicates,
 )
 
-VOTE_POLICY_VERSION = "detection_count_v1"
+VOTE_POLICY_VERSION = "detection_count_v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +26,7 @@ class ValidationSettings:
     speed_mm_s: float = 10.0
     exit_fraction: float = 0.05
     entry_fraction: float = 0.75
-    min_consensus: float = 0.90
+    min_consensus: float = 0.50
     max_gap_s: float = 0.5
 
     def validated(self) -> ValidationSettings:
@@ -37,7 +37,7 @@ class ValidationSettings:
                 "Beide Linien müssen im Bild liegen; die Abschlusslinie muss links "
                 "von der Eintrittslinie liegen."
             )
-        if not 0.5 < self.min_consensus < 1:
+        if not 0.5 <= self.min_consensus < 1:
             raise ValueError("Der Erkennungsanteil muss zwischen 50 und 100 Prozent liegen.")
         if not 0.05 <= self.max_gap_s <= 5:
             raise ValueError("Ungültige Überbrückungszeit.")
@@ -80,6 +80,7 @@ class PartTrack:
     hits: int = 1
     ambiguous: bool = False
     finalized: bool = False
+    entered: bool = False
     # Confidence sums are descriptive only; classification uses counts.
     weights: dict[int, float] = field(default_factory=dict)
     counts: dict[int, int] = field(default_factory=dict)
@@ -113,6 +114,7 @@ class ValidationTracker:
         self.tracks: dict[int, PartTrack] = {}
         self.results: list[ValidationResult] = []
         self._next_id = 1
+        self._next_pending_id = -1
         self._timestamp = -math.inf
         self._shape: tuple[int, int] | None = None
         self._evidence = evidence
@@ -152,18 +154,36 @@ class ValidationTracker:
             return 1e6
         return 0.6 * (1 - obb_iou(predicted.astype(np.float32), new)) + 0.4 * distance / gate
 
+    def _enter(self, track: PartTrack, image: np.ndarray, timestamp: float) -> None:
+        # Pre-entry detections establish motion only. Start the public identity,
+        # first image and votes when the trailing (rightmost) corner reaches entry.
+        del self.tracks[track.track_id]
+        track.track_id = self._next_id
+        self._next_id += 1
+        self.tracks[track.track_id] = track
+        track.entered = True
+        track.first_seen = timestamp
+        track.first_detection = track.detection
+        track.hits = 1
+        track.ambiguous = False
+        if self._first_evidence is not None:
+            self._first_evidence(track.track_id, track.detection, image)
+
     def _vote(self, track: PartTrack, image: np.ndarray, timestamp: float) -> None:
         detection = track.detection
         polygon = points(detection)
         height, width = image.shape[:2]
         if (
             track.finalized
+            or not track.entered
             or track.ambiguous
             or detection.class_id not in self.classes
             or polygon[:, 0].min() <= self.settings.exit_fraction * width
             or polygon[:, 0].max() >= width - 1
-            or polygon[:, 1].min() <= 0
-            or polygon[:, 1].max() >= height - 1
+            # Large flat parts may extend past the top/bottom of the image.
+            # Only reject boxes entirely outside the vertical capture region.
+            or polygon[:, 1].max() < 0
+            or polygon[:, 1].min() > height - 1
         ):
             return
         cid = detection.class_id
@@ -180,6 +200,8 @@ class ValidationTracker:
         if track.finalized:
             return
         track.finalized = True
+        if not track.entered:
+            return
         winner = track.winner
         recognized = (
             not track.ambiguous
@@ -196,7 +218,7 @@ class ValidationTracker:
         if track.hits == 1:
             reason += "; nur eine Erkennung"
         if track.observations == 0:
-            reason += "; keine gültige vollständig sichtbare Beobachtung"
+            reason += "; keine gültige Beobachtung im Auswertungsbereich"
         if track.ambiguous:
             reason += "; mehrdeutige Zuordnung"
         if not recognized and winner is not None and track.consensus <= self.settings.min_consensus:
@@ -301,6 +323,14 @@ class ValidationTracker:
                 track.velocity = 0.6 * velocity + 0.4 * track.velocity
                 track.detection, track.last_seen = detection, timestamp
                 track.hits += 1
+                polygon = points(detection)
+                if (
+                    not track.entered
+                    and not track.finalized
+                    and polygon[:, 0].max() <= self.settings.entry_fraction * width
+                    and polygon[:, 0].min() > self.settings.exit_fraction * width
+                ):
+                    self._enter(track, image, timestamp)
                 if points(detection)[:, 0].min() <= self.settings.exit_fraction * width:
                     self._finish(track, timestamp, "Abschlusslinie")
                 else:
@@ -319,14 +349,17 @@ class ValidationTracker:
                 or polygon[:, 0].min() <= self.settings.exit_fraction * width
             ):
                 continue
-            track = PartTrack(self._next_id, detection, timestamp, timestamp, detection)
-            self._next_id += 1
+            track = PartTrack(self._next_pending_id, detection, timestamp, timestamp, detection)
+            self._next_pending_id -= 1
             self.tracks[track.track_id] = track
-            if self._first_evidence is not None:
-                self._first_evidence(track.track_id, detection, image)
+            if polygon[:, 0].max() <= self.settings.entry_fraction * width:
+                self._enter(track, image, timestamp)
             self._vote(track, image, timestamp)
         for tid, track in list(self.tracks.items()):
             if timestamp - track.last_seen > self.settings.max_gap_s:
+                if not track.entered:
+                    del self.tracks[tid]
+                    continue
                 self._finish(track, timestamp, "Erkennung verloren", incomplete=True)
                 # Keep a sealed identity briefly to prevent a second count.
                 if timestamp - track.last_seen >= self.settings.max_gap_s + 1.5:

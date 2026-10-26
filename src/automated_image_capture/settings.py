@@ -433,7 +433,7 @@ class SettingsStore:
                 self._settings.value(f"validation/{name}", getattr(defaults, name))
             )
         if self._settings.value("validation/vote_policy") != VOTE_POLICY_VERSION:
-            # The old confidence-weighted threshold has a different meaning.
+            # Migrate weighted voting and the former 90% default to majority voting.
             values["min_consensus"] = defaults.min_consensus
         root = Path(
             str(

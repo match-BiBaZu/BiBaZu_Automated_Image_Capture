@@ -62,18 +62,27 @@ Positionsvorhersage aus gemessener Bildgeschwindigkeit und Hungarian-Zuordnung
 Abstand, vertikale Verschiebung und Flächenverhältnis begrenzen zulässige Zuordnungen.
 Bei konkurrierenden Zuordnungen mit weniger als 0,12 Kostendifferenz werden
 keine Klassenstimmen ausgetauscht; die betroffenen Tracks bleiben unsicher.
-Neue Bauteile müssen den rechten Eintrittsbereich berühren (standardmäßig letzte
-25 % der Breite). Eintritts- und Abschlusslinie sind im Livebild und als Prozentwerte
+Neue Bauteile werden zunächst rechts der Eintrittslinie vorverfolgt. Erst wenn ihre
+rechteste OBB-Ecke die Eintrittslinie von rechts erreicht oder überschreitet, beginnen
+öffentliche Track-ID, `first_seen`, Erstbild und Klassenstimmen. Ein Überspringen der
+Linie zwischen zwei Bildern genügt. Eine Ersterkennung genau auf der Linie beginnt
+ebenfalls die Auswertung; bereits links davon erscheinende Teile werden nicht übernommen.
+Vorläufige Kandidaten verwenden intern negative IDs und verschwinden bei Verlust oder
+Stop ohne Ergebnis, Beleg oder Posezähler. Eintritts- und Abschlusslinie sind im Livebild
+und als Prozentwerte
 einstellbar; es gilt 0 ≤ Abschluss < Eintritt < 100 %. Während eines Laufs sind beide
 gesperrt. Die gespeicherten Einstellungen und Sitzungsmetadaten enthalten beide Werte.
 Eine Verschiebung im Bild wird in Pixeln pro Zeit gemessen, nicht aus einer
 unbekannten Millimeter-pro-Pixel-Kalibrierung abgeleitet.
 
-Nur vollständig sichtbare OBBs rechts der Abschlusslinie stimmen ab. Jede gültige
+Nur OBBs rechts der Abschlusslinie und vollständig links vom rechten Bildrand stimmen ab.
+Kontakt oder Anschnitt am oberen und unteren Kamerabildrand ist zulässig; vollständig
+oberhalb oder unterhalb des Bildes liegende OBBs stimmen nicht ab. Jede gültige
 Erkennung zählt genau einmal; Gewinner und Anteil werden allein aus `counts`
 berechnet. Die Konfidenzsummen dienen nur dem Konfidenzmittel und der Belegauswahl.
-Die eindeutige Pose benötigt standardmäßig **mehr als 90 %** der gültigen Stimmen,
-ohne zusätzliche Mindestdauer oder Mindestzahl. Genau 90 % erfüllt die Regel nicht.
+Die eindeutige Pose benötigt standardmäßig **mehr als 50 %** der gültigen Stimmen,
+ohne zusätzliche Mindestdauer oder Mindestzahl. Genau 50 % erfüllt die Regel nicht;
+ein Gleichstand bleibt `Unklar`.
 Mehrdeutige Identitätszuordnungen bleiben von einer bestätigten Pose ausgeschlossen.
 Die Abschlussbeobachtung selbst wird ausgeschlossen. Verlorene Tracks werden nach
 0,5 s abgeschlossen, aus den bisherigen Stimmen bewertet und noch bis zu 1,5 s
@@ -89,10 +98,11 @@ ohne gültige Stimmen bei abgebrochener Verfolgung `Unvollständig`.
 Stimmen pro Klasse. `pass_completed` dokumentiert unabhängig von der Pose, ob die
 Abschlusslinie beobachtet wurde; ein Trackingverlust mit klarer Mehrheit kann daher
 `Erkannt` sein und einen Posezähler erhöhen. Der ursprüngliche Abschlussgrund bleibt erhalten.
-`session.json` nennt die Regel unter `vote_policy` (`detection_count_v1`, Vergleich `>`).
+`session.json` nennt die Regel unter `vote_policy` (`detection_count_v2`, Vergleich `>`).
 Die QSettings-Migration ignoriert alte Mindestzahl/-dauer und setzt die zuvor gewichtete
-Schwelle einmalig auf 90 %. Danach bleiben angepasste Zählschwellen gespeichert.
-Jeder im Eintrittsbereich angelegte Track wird abgeschlossen, auch bei nur einem
+Schwelle oder die bisherige `detection_count_v1`-Schwelle einmalig auf 50 %.
+Danach bleiben angepasste Zählschwellen gespeichert.
+Jeder an der Eintrittslinie begonnene Track wird abgeschlossen, auch bei nur einem
 Treffer oder ohne gültige Klassenstimme. Es gibt keinen stillen Mindesttrefferfilter.
 `reason` benennt Einzel-Erkennung, fehlende gültige Beobachtungen, mehrdeutige
 Zuordnung oder verfehlte Konsensanforderungen; die GUI zeigt diesen Grund und
@@ -113,8 +123,8 @@ wird nicht verändert; Dauerlauf entspricht dem bisherigen manuellen Rechts-Befe
 Aufnahme- und Validation-Steuerung sind gegenseitig gesperrt.
 
 `ValidationSessionStore` schreibt seriell im Hintergrund mit höchstens 16
-ausstehenden Schreibaufträgen. Beim Anlegen jedes Tracks wird das vollständige
-Erstbild unabhängig von der Gültigkeit als Posebeobachtung unter `erstbilder/`
+ausstehenden Schreibaufträgen. Beim Beginn der Auswertung an der Eintrittslinie wird
+das vollständige Erstbild unabhängig von der Gültigkeit als Posebeobachtung unter `erstbilder/`
 gesichert. Es zeigt die ursprüngliche OBB/Klasse/Konfidenz mit dem Hinweis
 „Erste Erkennung (ungeprüft)“ und wird durch spätere bessere Beobachtungen nicht
 überschrieben. `first_image`, `first_class_id` und `first_confidence` stehen in
