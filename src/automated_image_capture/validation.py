@@ -11,7 +11,14 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from automated_image_capture.inference import InferenceDetection
+from automated_image_capture.inference import (
+    InferenceDetection,
+    obb_iou,
+    points,
+    suppress_duplicates,
+)
+
+VOTE_POLICY_VERSION = "detection_count_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,22 +26,19 @@ class ValidationSettings:
     speed_mm_s: float = 10.0
     exit_fraction: float = 0.05
     entry_fraction: float = 0.75
-    min_observations: int = 5
-    min_duration_s: float = 0.25
-    min_consensus: float = 0.70
+    min_consensus: float = 0.90
     max_gap_s: float = 0.5
 
     def validated(self) -> ValidationSettings:
         if not 0.1 <= self.speed_mm_s <= 200:
             raise ValueError("Die Bandgeschwindigkeit muss zwischen 0,1 und 200 mm/s liegen.")
-        if not 0 <= self.exit_fraction <= 0.5:
-            raise ValueError("Die Abschlusslinie muss in der linken Bildhälfte liegen.")
-        if not self.exit_fraction < self.entry_fraction < 1:
-            raise ValueError("Eintrittsbereich und Abschlusslinie überlappen sich.")
-        if not 2 <= self.min_observations <= 1000:
-            raise ValueError("Mindestens zwei Beobachtungen sind erforderlich.")
-        if not 0 <= self.min_duration_s <= 60 or not 0.5 < self.min_consensus <= 1:
-            raise ValueError("Ungültige Konsensparameter.")
+        if not 0 <= self.exit_fraction < self.entry_fraction < 1:
+            raise ValueError(
+                "Beide Linien müssen im Bild liegen; die Abschlusslinie muss links "
+                "von der Eintrittslinie liegen."
+            )
+        if not 0.5 < self.min_consensus < 1:
+            raise ValueError("Der Erkennungsanteil muss zwischen 50 und 100 Prozent liegen.")
         if not 0.05 <= self.max_gap_s <= 5:
             raise ValueError("Ungültige Überbrückungszeit.")
         return self
@@ -55,6 +59,14 @@ class ValidationResult:
     speed_mm_s: float
     image: str | None
     evidence_class_id: int | None = None
+    candidate_class_id: int | None = None
+    candidate_pose: str | None = None
+    first_image: str | None = None
+    first_class_id: int | None = None
+    first_confidence: float | None = None
+    winning_observations: int = 0
+    pose_observations: dict[int, int] = field(default_factory=dict)
+    pass_completed: bool = False
 
 
 @dataclass(slots=True)
@@ -63,15 +75,15 @@ class PartTrack:
     detection: InferenceDetection
     first_seen: float
     last_seen: float
+    first_detection: InferenceDetection
     velocity: np.ndarray = field(default_factory=lambda: np.zeros(2))
     hits: int = 1
     ambiguous: bool = False
     finalized: bool = False
+    # Confidence sums are descriptive only; classification uses counts.
     weights: dict[int, float] = field(default_factory=dict)
     counts: dict[int, int] = field(default_factory=dict)
     best: dict[int, float] = field(default_factory=dict)
-    first_vote: float | None = None
-    last_vote: float | None = None
 
     @property
     def observations(self) -> int:
@@ -79,41 +91,12 @@ class PartTrack:
 
     @property
     def winner(self) -> int | None:
-        return max(self.weights, key=self.weights.get) if self.weights else None
+        return max(self.counts, key=self.counts.get) if self.counts else None
 
     @property
     def consensus(self) -> float:
-        total = sum(self.weights.values())
-        return max(self.weights.values()) / total if total > 0 else 0.0
-
-
-def points(detection: InferenceDetection) -> np.ndarray:
-    return np.asarray(detection.corners, dtype=np.float32)
-
-
-def obb_iou(a: np.ndarray, b: np.ndarray) -> float:
-    area_a, area_b = abs(cv2.contourArea(a)), abs(cv2.contourArea(b))
-    if min(area_a, area_b) <= 0:
-        return 0.0
-    intersection, _ = cv2.intersectConvexConvex(cv2.convexHull(a), cv2.convexHull(b))
-    return float(intersection) / max(1e-9, area_a + area_b - intersection)
-
-
-def suppress_duplicates(detections: tuple[InferenceDetection, ...]) -> list[InferenceDetection]:
-    kept: list[InferenceDetection] = []
-    for detection in sorted(detections, key=lambda d: d.confidence, reverse=True):
-        polygon = points(detection)
-        if (
-            polygon.shape != (4, 2)
-            or not np.isfinite(polygon).all()
-            or not math.isfinite(detection.confidence)
-            or detection.confidence <= 0
-            or abs(cv2.contourArea(polygon)) <= 1
-        ):
-            continue
-        if all(obb_iou(polygon, points(other)) < 0.6 for other in kept):
-            kept.append(detection)
-    return kept
+        total = self.observations
+        return max(self.counts.values()) / total if total else 0.0
 
 
 class ValidationTracker:
@@ -122,6 +105,8 @@ class ValidationTracker:
         settings: ValidationSettings,
         classes: dict[int, str],
         evidence: Callable[[int, InferenceDetection, np.ndarray], None] | None = None,
+        *,
+        first_evidence: Callable[[int, InferenceDetection, np.ndarray], None] | None = None,
     ) -> None:
         self.settings = settings.validated()
         self.classes = dict(classes)
@@ -131,6 +116,7 @@ class ValidationTracker:
         self._timestamp = -math.inf
         self._shape: tuple[int, int] | None = None
         self._evidence = evidence
+        self._first_evidence = first_evidence
 
     def counts(self) -> dict[str, int]:
         counts = Counter(result.status for result in self.results)
@@ -183,9 +169,6 @@ class ValidationTracker:
         cid = detection.class_id
         track.weights[cid] = track.weights.get(cid, 0) + detection.confidence
         track.counts[cid] = track.counts.get(cid, 0) + 1
-        if track.first_vote is None:
-            track.first_vote = timestamp
-        track.last_vote = timestamp
         if detection.confidence > track.best.get(cid, -1):
             if self._evidence is not None:
                 self._evidence(track.track_id, detection, image)
@@ -198,20 +181,16 @@ class ValidationTracker:
             return
         track.finalized = True
         winner = track.winner
-        span = (
-            track.last_vote - track.first_vote
-            if track.first_vote is not None and track.last_vote is not None
-            else 0
-        )
         recognized = (
-            not incomplete
-            and not track.ambiguous
+            not track.ambiguous
             and winner is not None
-            and track.observations >= self.settings.min_observations
-            and span >= self.settings.min_duration_s
-            and track.consensus >= self.settings.min_consensus
+            and track.consensus > self.settings.min_consensus
         )
-        status = "Unvollständig" if incomplete else "Erkannt" if recognized else "Unklar"
+        status = (
+            "Erkannt" if recognized
+            else "Unvollständig" if incomplete and not track.observations
+            else "Unklar"
+        )
         # An entry detection is an attempted identification, even if tracking or
         # pose voting fails immediately. Never silently discard that attempt.
         if track.hits == 1:
@@ -220,13 +199,10 @@ class ValidationTracker:
             reason += "; keine gültige vollständig sichtbare Beobachtung"
         if track.ambiguous:
             reason += "; mehrdeutige Zuordnung"
-        if not incomplete and not recognized:
-            if track.observations < self.settings.min_observations:
-                reason += "; zu wenige gültige Beobachtungen"
-            if span < self.settings.min_duration_s:
-                reason += "; Beobachtungsdauer zu kurz"
-            if winner is not None and track.consensus < self.settings.min_consensus:
-                reason += "; Konsensanteil zu niedrig"
+        if not recognized and winner is not None and track.consensus <= self.settings.min_consensus:
+            reason += "; Erkennungsanteil überschreitet die Schwelle nicht"
+        if recognized and incomplete:
+            reason += "; Pose aus Erkennungsmehrheit festgelegt"
         self.results.append(
             ValidationResult(
                 track.track_id,
@@ -241,7 +217,15 @@ class ValidationTracker:
                 track.weights[winner] / track.counts[winner] if winner is not None else 0,
                 self.settings.speed_mm_s,
                 f"bilder/{track.track_id:06d}.png" if winner is not None else None,
-                winner,
+                evidence_class_id=winner,
+                candidate_class_id=winner,
+                candidate_pose=self.classes.get(winner),
+                first_image=f"erstbilder/{track.track_id:06d}.png",
+                first_class_id=track.first_detection.class_id,
+                first_confidence=track.first_detection.confidence,
+                winning_observations=track.counts.get(winner, 0),
+                pose_observations=dict(track.counts),
+                pass_completed=not incomplete,
             )
         )
 
@@ -335,9 +319,11 @@ class ValidationTracker:
                 or polygon[:, 0].min() <= self.settings.exit_fraction * width
             ):
                 continue
-            track = PartTrack(self._next_id, detection, timestamp, timestamp)
+            track = PartTrack(self._next_id, detection, timestamp, timestamp, detection)
             self._next_id += 1
             self.tracks[track.track_id] = track
+            if self._first_evidence is not None:
+                self._first_evidence(track.track_id, detection, image)
             self._vote(track, image, timestamp)
         for tid, track in list(self.tracks.items()):
             if timestamp - track.last_seen > self.settings.max_gap_s:

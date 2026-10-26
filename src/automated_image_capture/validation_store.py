@@ -36,6 +36,7 @@ class ValidationSessionStore(QObject):
         self.directory = root / f"validation_{stamp}_{uuid4().hex[:8]}"
         (self.directory / "belege").mkdir(parents=True)
         (self.directory / "bilder").mkdir()
+        (self.directory / "erstbilder").mkdir()
         atomic_json(self.directory / "session.json", metadata)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="validation-save")
         self._slots = threading.BoundedSemaphore(16)
@@ -66,18 +67,29 @@ class ValidationSessionStore(QObject):
         # At most sixteen frame copies are retained by the writer queue.
         self._submit(self._write_evidence, track_id, detection, image.copy())
 
-    def _write_evidence(self, track_id: int, detection: InferenceDetection, image: np.ndarray):
+    def first_evidence(
+        self, track_id: int, detection: InferenceDetection, image: np.ndarray
+    ) -> None:
+        self._submit(self._write_evidence, track_id, detection, image.copy(), True)
+
+    def _write_evidence(
+        self, track_id: int, detection: InferenceDetection, image: np.ndarray, first: bool = False
+    ):
         annotated = draw_obb_overlay(image, (detection,))
         cv2.putText(
             annotated,
-            f"Track {track_id}",
+            f"Track {track_id}" + (" - Erste Erkennung (ungeprueft)" if first else ""),
             (12, 28),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (255, 255, 0),
             2,
         )
-        path = self.directory / "belege" / f"{track_id:06d}_{detection.class_id}.png"
+        path = (
+            self.directory / "erstbilder" / f"{track_id:06d}.png"
+            if first
+            else self.directory / "belege" / f"{track_id:06d}_{detection.class_id}.png"
+        )
         self._png(path, annotated)
 
     @staticmethod
@@ -101,7 +113,15 @@ class ValidationSessionStore(QObject):
                 image = cv2.imread(str(source))
                 if image is None:
                     raise OSError(f"Belegbild fehlt: {source}")
-                label = f"{result.status}: {result.pose}".encode("ascii", "replace").decode()
+                description = (
+                    result.pose if result.status == "Erkannt"
+                    else f"{result.candidate_pose} (vorlaeufig)" if result.candidate_pose
+                    else "keine Pose"
+                )
+                label = f"{result.status}: {description}"
+                for original, replacement in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+                    label = label.replace(original, replacement)
+                label = label.encode("ascii", "replace").decode()
                 cv2.putText(image, label, (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 self._png(self.directory / result.image, cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
             # Immutable per-part records survive an interrupted session snapshot.
@@ -118,19 +138,28 @@ class ValidationSessionStore(QObject):
         target = destination / f"{self.directory.name}_export_{uuid4().hex[:8]}"
         target.mkdir(parents=True)
         (target / "bilder").mkdir()
+        (target / "erstbilder").mkdir()
         columns = [
             "track_id",
             "first_seen",
             "finished_at",
             "class_id",
             "pose",
+            "candidate_class_id",
+            "candidate_pose",
             "status",
             "reason",
             "observations",
+            "winning_observations",
+            "pose_observations",
             "consensus",
+            "pass_completed",
             "mean_confidence",
             "speed_mm_s",
             "image",
+            "first_image",
+            "first_class_id",
+            "first_confidence",
         ]
         with (target / "bauteile.csv").open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(
@@ -139,11 +168,18 @@ class ValidationSessionStore(QObject):
             writer.writeheader()
             for record in snapshot["results"]:
                 row = dict(record)
+                row["pose_observations"] = json.dumps(
+                    row.get("pose_observations", {}), ensure_ascii=False, sort_keys=True
+                )
                 for key in ("first_seen", "finished_at"):
                     row[key] = datetime.fromtimestamp(row[key]).astimezone().isoformat()
                 writer.writerow(row)
                 if record["image"]:
                     shutil.copy2(self.directory / record["image"], target / record["image"])
+                if record.get("first_image"):
+                    shutil.copy2(
+                        self.directory / record["first_image"], target / record["first_image"]
+                    )
         with (target / "summen.csv").open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.writer(stream, delimiter=";")
             writer.writerow(["Klassen-ID", "Pose/Status", "Anzahl"])

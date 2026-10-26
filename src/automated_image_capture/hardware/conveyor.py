@@ -41,6 +41,7 @@ TANDEM_CONFIG_VALUES = {
 
 STATUS_SYMBOLS = {
     "MAIN.GuiConveyorEnabled": "continuous_enabled",
+    "MAIN.GuiConveyorCalibrationMode": "calibration_mode",
     "MAIN.GuiConveyorSpeedMmPerSec": "continuous_speed_mm_s",
     "MAIN.StepperPosBusy": "motion_busy",
     "MAIN.StepperPosError": "motion_error",
@@ -50,6 +51,7 @@ STATUS_SYMBOLS = {
     "MAIN.ConveyorServoVelocityOnly": "velocity_only",
     "MAIN.ConveyorServoMotorCount": "motor_count",
     "MAIN.ConveyorServoFaultCode": "servo_fault_code",
+    "MAIN.ConveyorServoState": "servo_state",
     "MAIN.ConveyorServoAccelerationRpmPerSec": "acceleration_rpm_per_s",
     "MAIN.CalibrationBusy": "busy",
     "MAIN.CalibrationError": "error",
@@ -281,6 +283,62 @@ class ConveyorWorker(QObject):
         if failed:
             raise RuntimeError(f"ADS-Sammelschreibzugriff fehlgeschlagen: {failed}")
 
+    def _clear_stale_startup_status(self, plc: Any, values: dict, pyads: Any) -> dict:
+        """Acknowledge only a historical diagnostic; never reset or enable a drive."""
+        def eligible(sample):
+            return (
+                sample["MAIN.CalibrationStatusCode"] == 5
+                and bool(sample["MAIN.ConveyorServoVelocityOnly"])
+                and sample["MAIN.ConveyorCaptureInterfaceVersion"] == 1
+                and not sample["MAIN.CalibrationError"]
+                and not sample["MAIN.StepperPosError"]
+                and sample["MAIN.ConveyorServoFaultCode"] == 0
+                and sample["MAIN.ConveyorServoState"] == 0
+                and not sample["MAIN.CalibrationBusy"]
+                and not sample["MAIN.StepperPosBusy"]
+                and not sample["MAIN.StepperControlEnable"]
+                and not sample["MAIN.GuiConveyorEnabled"]
+                and not sample["MAIN.GuiConveyorCalibrationMode"]
+                and sample["MAIN.ConveyorServo1TargetVelocity"] == 0
+                and sample["MAIN.ConveyorServo2TargetVelocity"] == 0
+            )
+
+        if (
+            self._requested_move is not None
+            or self._continuous_requested
+            or not self._commands.empty()
+            or self._stop.is_set()
+            or self._cancel_motion.is_set()
+            or not eligible(values)
+        ):
+            return values
+        # Recheck the live signals and encoder before touching the retained code.
+        current = plc.read_list_by_name(list(STATUS_SYMBOLS), cache_symbol_info=True)
+        if (
+            not eligible(current)
+            or current["MAIN.StepperInternalPosition"] != values["MAIN.StepperInternalPosition"]
+            or not self._commands.empty()
+            or self._stop.is_set()
+            or self._cancel_motion.is_set()
+        ):
+            return current
+        try:
+            self._write_values(plc, {"MAIN.CalibrationStatusCode": 0}, pyads)
+        except Exception as exc:
+            self.event_message.emit(f"Alter SPS-Status 5 konnte nicht quittiert werden: {exc}")
+            return current
+        verified = plc.read_list_by_name(list(STATUS_SYMBOLS), cache_symbol_info=True)
+        if verified["MAIN.CalibrationStatusCode"] == 0:
+            self.event_message.emit(
+                "Alten SPS-Status 5 beim Verbinden quittiert; Antrieb unverändert im Stillstand."
+            )
+        else:
+            self.event_message.emit(
+                "Die SPS meldet nach der Statusquittierung weiterhin einen Status; "
+                "die aktuelle Meldung bleibt wirksam."
+            )
+        return verified
+
     def _handle_command(self, plc: Any, command: str, payload: object | None, pyads: Any) -> None:
         if command == "stop":
             self._continuous_requested = False
@@ -416,6 +474,7 @@ class ConveyorWorker(QObject):
         pyads: Any = None
         last_attempt = 0.0
         last_error = ""
+        startup_status_pending = False
         self.state_changed.emit(ConnectionState.CONNECTING)
         try:
             import pyads as imported_pyads
@@ -434,6 +493,7 @@ class ConveyorWorker(QObject):
                         )
                         plc.open()
                         plc.read_state()
+                        startup_status_pending = True
                         self.state_changed.emit(ConnectionState.CONNECTED)
                         self.event_message.emit(
                             f"TwinCAT ADS verbunden ({self._config.plc_ip}, "
@@ -467,6 +527,9 @@ class ConveyorWorker(QObject):
 
                 try:
                     values = plc.read_list_by_name(list(STATUS_SYMBOLS), cache_symbol_info=True)
+                    if startup_status_pending:
+                        startup_status_pending = False
+                        values = self._clear_stale_startup_status(plc, values, pyads)
                     status = ConveyorStatus(
                         connected=True,
                         capture_interface_version=int(
@@ -725,16 +788,36 @@ class ConveyorAdapter(DeviceAdapter):
         self._worker = None
         self._thread = None
 
-    def set_forward_direction(self, direction: str) -> None:
-        if direction not in {"left", "right"}:
+    def set_forward_direction(self, direction: str) -> bool:
+        if direction not in {"", "left", "right"}:
             raise ValueError("Bitte zuerst Links oder Rechts als Vorwärtsrichtung festlegen.")
+        if (
+            self._status.busy
+            or self._status.preparing_drive
+            or self._status.requested_sequence is not None
+            or self._status.continuous_requested
+            or self._status.continuous_running
+        ):
+            self._emit_error("Die Vorwärtsrichtung kann nur im Stillstand geändert werden.")
+            return False
         self._status.forward_direction = direction
         self.config.conveyor_forward_direction = direction
         self._decorate_status()
         self.status_changed.emit(replace(self._status))
+        return True
 
     def set_current_as_origin(self) -> bool:
-        if self._status.internal_position is None or self._status.busy:
+        if (
+            self.state is not ConnectionState.CONNECTED
+            or self._status.internal_position is None
+            or self._status.busy
+            or self._status.preparing_drive
+            or self._status.requested_sequence is not None
+            or self._status.continuous_requested
+            or self._status.continuous_running
+            or self._status.error
+            or self._status.servo_fault_code != 0
+        ):
             self._emit_error("Der Förderband-Nullpunkt kann aktuell nicht übernommen werden.")
             return False
         self._origin_position = self._status.internal_position

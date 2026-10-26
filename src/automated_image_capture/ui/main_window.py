@@ -182,6 +182,9 @@ class MainWindow(QMainWindow):
         self.light_saturation = self.light_card.saturation
         self.light_command_timer = self.light_card.command_timer
         self.acquisition_card.set_settings(self.acquisition_config)
+        self.acquisition_card.set_conveyor_direction(
+            self.config.conveyor_forward_direction, self.acquisition_config.conveyor_enabled
+        )
         cards_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -192,9 +195,10 @@ class MainWindow(QMainWindow):
         self.validation_panel = ValidationPanel()
         saved_validation, saved_root = self.settings_store.load_validation()
         self.validation_panel.speed.setValue(saved_validation.speed_mm_s)
+        # Restore the entry bound before applying an exit beyond the default entry.
+        self.validation_panel.line.setValue(0)
+        self.validation_panel.entry.setValue(saved_validation.entry_fraction * 100)
         self.validation_panel.line.setValue(saved_validation.exit_fraction * 100)
-        self.validation_panel.min_observations.setValue(saved_validation.min_observations)
-        self.validation_panel.min_duration.setValue(saved_validation.min_duration_s)
         self.validation_panel.min_consensus.setValue(saved_validation.min_consensus * 100)
         self.validation_panel.output.setText(str(saved_root))
         self.validation_panel.setMinimumWidth(570)
@@ -250,10 +254,38 @@ class MainWindow(QMainWindow):
         inference_controls.addWidget(self.inference_status)
         preview_layout.addLayout(inference_controls)
 
+        duplicate_controls = QHBoxLayout()
+        self.inference_duplicate_filter = QCheckBox("Doppelte Posen filtern")
+        self.inference_duplicate_filter.setChecked(self.inference_config.duplicate_filter)
+        self.inference_duplicate_filter.setToolTip(
+            "Bei stark überlappenden OBBs bleibt nur die Pose mit der höchsten Konfidenz."
+        )
+        self.inference_duplicate_iou = QDoubleSpinBox()
+        self.inference_duplicate_iou.setRange(0.01, 1)
+        self.inference_duplicate_iou.setSingleStep(0.05)
+        self.inference_duplicate_iou.setDecimals(2)
+        self.inference_duplicate_iou.setValue(self.inference_config.duplicate_iou)
+        self.inference_duplicate_iou.setPrefix("Überlappung (IoU) ")
+        self.inference_duplicate_iou.setToolTip(
+            "Ab dieser OBB-Überlappung wird die schwächere Erkennung ausgeblendet. "
+            "Kleinere Werte filtern stärker. Standard: 0,60."
+        )
+        self.inference_duplicate_iou.setEnabled(self.inference_config.duplicate_filter)
+        self.inference_duplicate_filter.toggled.connect(self._apply_inference_runtime_settings)
+        self.inference_duplicate_iou.editingFinished.connect(self._apply_inference_runtime_settings)
+        duplicate_controls.addWidget(self.inference_duplicate_filter)
+        duplicate_controls.addWidget(self.inference_duplicate_iou)
+        duplicate_controls.addStretch(1)
+        preview_layout.addLayout(duplicate_controls)
+
         self.preview = ValidationPreview("Noch kein Kamerabild")
-        self.preview.line_fraction = saved_validation.exit_fraction
+        self.preview.line_fraction = self.validation_panel.line.value() / 100
+        self.preview.entry_fraction = self.validation_panel.entry.value() / 100
         self.preview.line_changed.connect(
             lambda value: self.validation_panel.line.setValue(value * 100)
+        )
+        self.preview.entry_changed.connect(
+            lambda value: self.validation_panel.entry.setValue(value * 100)
         )
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(640, 480)
@@ -293,6 +325,7 @@ class MainWindow(QMainWindow):
         self.validation_panel.export_requested.connect(self._export_validation)
         self.validation_panel.reset_requested.connect(self.validation.reset)
         self.validation_panel.line_changed.connect(self._validation_line)
+        self.validation_panel.entry_changed.connect(self._validation_entry)
         self.camera.capture_frame_ready.connect(self._validation_camera_frame)
         self._refresh_validation()
         for adapter, card in (
@@ -418,6 +451,8 @@ class MainWindow(QMainWindow):
             image_size=self.inference_config.image_size,
             max_fps=float(self.inference_max_fps.value()),
             device=self.inference_config.device,
+            duplicate_filter=self.inference_duplicate_filter.isChecked(),
+            duplicate_iou=self.inference_duplicate_iou.value(),
         )
 
     def _choose_inference_model(self) -> None:
@@ -516,7 +551,12 @@ class MainWindow(QMainWindow):
             self._inference_worker.update_runtime_settings(
                 config.confidence,
                 config.max_fps,
+                duplicate_filter=config.duplicate_filter,
+                duplicate_iou=config.duplicate_iou,
             )
+        self.inference_duplicate_iou.setEnabled(
+            config.duplicate_filter and not self.validation.running
+        )
 
     def _inference_frame(self, frame: InferenceFrame) -> None:
         started = time.perf_counter()
@@ -612,17 +652,22 @@ class MainWindow(QMainWindow):
 
     def _conveyor_status(self, status: ConveyorStatus) -> None:
         self.conveyor_card.set_status(status)
+        self.acquisition_card.set_conveyor_direction(
+            status.forward_direction, self.acquisition_config.conveyor_enabled
+        )
         self._refresh_acquisition_preflight()
 
     def _jog_conveyor(self, direction: str, distance_mm: float) -> None:
         self.conveyor.jog(direction, distance_mm, 10.0)
 
     def _set_conveyor_forward_direction(self, direction: str) -> None:
-        if not direction:
-            self.config.conveyor_forward_direction = ""
-        else:
-            self.conveyor.set_forward_direction(direction)
-            self.config.conveyor_forward_direction = direction
+        if self.acquisition.running or self.validation.running:
+            self.conveyor_card.set_status(self.conveyor.status)
+            return
+        if not self.conveyor.set_forward_direction(direction):
+            self.conveyor_card.set_status(self.conveyor.status)
+            return
+        self.config.conveyor_forward_direction = direction
         self.settings_store.save(self.config)
         self._refresh_acquisition_preflight()
         if direction:
@@ -724,6 +769,9 @@ class MainWindow(QMainWindow):
         self.acquisition_config = dialog.result_config
         self.settings_store.save_acquisition(self.acquisition_config)
         self.acquisition_card.set_settings(self.acquisition_config)
+        self.acquisition_card.set_conveyor_direction(
+            self.config.conveyor_forward_direction, self.acquisition_config.conveyor_enabled
+        )
         self._refresh_acquisition_preflight()
         self._append_event("Einstellungen für die automatische Aufnahme gespeichert.")
 
@@ -818,6 +866,11 @@ class MainWindow(QMainWindow):
             self.preview.line_fraction = value
             self.preview.update()
 
+    def _validation_entry(self, value: float) -> None:
+        if not self.validation.running:
+            self.preview.entry_fraction = value
+            self.preview.update()
+
     def _refresh_validation(self) -> None:
         self.validation_panel.refresh(self.validation)
         self.validation_panel.start.setEnabled(
@@ -845,11 +898,16 @@ class MainWindow(QMainWindow):
             self.inference_toggle,
             self.inference_confidence,
             self.inference_max_fps,
+            self.inference_duplicate_filter,
+            self.inference_duplicate_iou,
             self.acquisition_card,
             self.conveyor_card,
             self.camera_card,
         ):
             widget.setEnabled(not running)
+        self.inference_duplicate_iou.setEnabled(
+            not running and self.inference_duplicate_filter.isChecked()
+        )
         if not running:
             self._refresh_acquisition_preflight()
 

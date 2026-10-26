@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 import time
 from collections import deque
@@ -21,6 +22,8 @@ class LiveInferenceConfig:
     image_size: int = 640
     max_fps: float = 15.0
     device: str = "0"
+    duplicate_filter: bool = True
+    duplicate_iou: float = 0.6
 
     def validated(self, *, require_model: bool = True) -> LiveInferenceConfig:
         model_path = Path(self.model_path).expanduser()
@@ -32,6 +35,8 @@ class LiveInferenceConfig:
             raise ValueError("Die Inferenz-Bildgröße muss ein Vielfaches von 32 sein.")
         if not 0.2 <= self.max_fps <= 60:
             raise ValueError("Die Inferenz-Bildrate muss zwischen 0,2 und 60 FPS liegen.")
+        if not 0 < self.duplicate_iou <= 1:
+            raise ValueError("Die Überlappungsschwelle muss größer als 0 und höchstens 1 sein.")
         return replace(self, model_path=model_path)
 
 
@@ -41,6 +46,38 @@ class InferenceDetection:
     class_name: str
     confidence: float
     corners: tuple[tuple[float, float], ...]
+
+
+def points(detection: InferenceDetection) -> np.ndarray:
+    return np.asarray(detection.corners, dtype=np.float32)
+
+
+def obb_iou(a: np.ndarray, b: np.ndarray) -> float:
+    area_a, area_b = abs(cv2.contourArea(a)), abs(cv2.contourArea(b))
+    if min(area_a, area_b) <= 0:
+        return 0.0
+    intersection, _ = cv2.intersectConvexConvex(cv2.convexHull(a), cv2.convexHull(b))
+    return float(intersection) / max(1e-9, area_a + area_b - intersection)
+
+
+def suppress_duplicates(
+    detections: tuple[InferenceDetection, ...], iou_threshold: float = 0.6
+) -> list[InferenceDetection]:
+    """Keep the strongest OBB per overlapping region, across all pose classes."""
+    kept: list[InferenceDetection] = []
+    for detection in sorted(detections, key=lambda d: d.confidence, reverse=True):
+        polygon = points(detection)
+        if (
+            polygon.shape != (4, 2)
+            or not np.isfinite(polygon).all()
+            or not math.isfinite(detection.confidence)
+            or detection.confidence <= 0
+            or abs(cv2.contourArea(polygon)) <= 1
+        ):
+            continue
+        if all(obb_iou(polygon, points(other)) < iou_threshold for other in kept):
+            kept.append(detection)
+    return kept
 
 
 @dataclass(slots=True, frozen=True)
@@ -190,10 +227,26 @@ class LiveInferenceWorker(QThread):
             self._submissions.append(time.monotonic())
             self._condition.notify()
 
-    def update_runtime_settings(self, confidence: float, max_fps: float) -> None:
-        candidate = replace(self._config, confidence=confidence, max_fps=max_fps).validated()
+    def update_runtime_settings(
+        self,
+        confidence: float,
+        max_fps: float,
+        *,
+        duplicate_filter: bool | None = None,
+        duplicate_iou: float | None = None,
+    ) -> None:
         with self._condition:
-            self._config = candidate
+            self._config = replace(
+                self._config,
+                confidence=confidence,
+                max_fps=max_fps,
+                duplicate_filter=(
+                    self._config.duplicate_filter if duplicate_filter is None else duplicate_filter
+                ),
+                duplicate_iou=(
+                    self._config.duplicate_iou if duplicate_iou is None else duplicate_iou
+                ),
+            ).validated()
             self._condition.notify()
 
     def stop(self, wait_ms: int = 10_000) -> bool:
@@ -272,6 +325,8 @@ class LiveInferenceWorker(QThread):
                 inference_ms = (predicted - started) * 1000
                 result = results[0] if results else None
                 detections = () if result is None else extract_obb_detections(result)
+                if config.duplicate_filter:
+                    detections = tuple(suppress_duplicates(detections, config.duplicate_iou))
                 extracted = time.perf_counter()
                 annotated = draw_obb_overlay(image, detections)
                 overlaid = time.perf_counter()

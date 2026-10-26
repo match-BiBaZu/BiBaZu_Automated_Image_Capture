@@ -35,6 +35,26 @@ uv run python -m automated_image_capture
 5. **Aufnahme konfigurieren …** öffnen: Ausgabeordner, Lichtvariation, optional Belichtungsvariation und Bandfahrt einstellen.
 6. **Aufnahme starten** wählen und den freien Arbeitsraum bestätigen.
 
+In der Förderbandkarte legt **Vorwärtsrichtung** fest, ob die Hinfahrt der
+automatischen Aufnahme nach **Links** oder **Rechts** führt. Die Aufnahmeübersicht
+zeigt Hinfahrt und entgegengesetzte Rückfahrt sofort an; die Auswahl wird gespeichert.
+Während einer Aufnahme oder vorbereiteten/laufenden Fahrt ist die Änderung gesperrt.
+Die Links-/Rechts-Tasten bleiben manuelle Testfahrten; die Richtungsauswahl allein
+startet keine Bewegung.
+
+**Aktuelle Position = 0 mm** setzt nur den lokalen Bezugspunkt und bewegt das Band
+nicht. Die Taste ist bei lesbarer Position, Stillstand und ohne aktuellen Antriebsfehler
+verfügbar, auch im Standby. Ein alter SPS-Status 5 kann nach einem behobenen Fehler
+stehen bleiben. Bei der aktuellen Tandem-SPS sind dann manuelle Testfahrten wieder
+möglich, sofern Fehlerflag und Servo-Fehlercode null sind; die normale Antriebsvorbereitung
+und SPS-Prüfung laufen weiterhin vor jedem Fahrbefehl. Für synchronisierte Aufnahmen
+zuerst die Encoderänderung durch eine kurze Testfahrt prüfen und danach den Nullpunkt setzen.
+Beim Verbinden nach App-Start oder ADS-Neuverbindung wird ein alter Status 5 einmalig
+quittiert, wenn beide Motoren inaktiv sind, alle aktuellen Fehlersignale frei sind und
+eine zweite Positionsabfrage Stillstand bestätigt. Dabei wird nur der historische
+Diagnosewert gelöscht; Motorfreigabe, Antriebsreset und Fahrbefehle bleiben unangetastet.
+Aktuelle Fehler, laufende Aufträge und andere Statuscodes werden nicht automatisch quittiert.
+
 ### Aufnahmemodus wählen
 
 - **Diskrete Stationen:** Das Band hält an jeder Position für die Licht- und Belichtungsreihe.
@@ -58,8 +78,11 @@ uv run python -m automated_image_capture
    **YOLO Validation** erscheinen alle Modellposen mit ihren Zählern, auch ohne Treffer.
 3. Die Bandgeschwindigkeit einstellen (Standard 10 mm/s). Die Bildbewegung ist
    unabhängig von der Bandrichtung **rechts → links**.
-4. Die rote Abschlusslinie im Livebild anklicken/ziehen oder als Prozentwert einstellen.
-   Standard sind 5 % vom linken Bildrand; die blaue Linie markiert den Eintrittsbereich.
+4. Die rote Abschlusslinie und die blaue Eintrittslinie im Livebild anklicken/ziehen
+   oder als Prozentwerte einstellen. Beim Ziehen wird die nächstgelegene Linie gewählt.
+   Standard sind 5 % und 75 % vom linken Bildrand. Die Abschlusslinie darf auch über
+   50 % liegen, bleibt aber immer links von der Eintrittslinie. Beide Linien lassen
+   sich vor dem Start einstellen und werden mit den Sitzungseinstellungen gespeichert.
 5. **Validation starten** startet nach erfolgreicher Kamerainferenz beide Bandmotoren.
    Räumlich getrennte Bauteile rechts ins Bild einlaufen lassen. Bereits mitten im
    Bild liegende Teile werden nicht als neue Durchfahrt übernommen.
@@ -69,24 +92,43 @@ uv run python -m automated_image_capture
    Wechsel zum Aufnahme-Reiter sichtbar. Automatische Aufnahme und Validation
    können nicht gleichzeitig laufen.
 
-Jedes Bauteil erhält eine eigene Track-ID. Seine Pose wird über mehrere vollständig
-sichtbare Beobachtungen nach ihrer Konfidenz gewichtet abgestimmt: standardmäßig mindestens
-fünf Beobachtungen über 0,25 s und mindestens 70 % Konsens. Die Werte stehen unter
-**Erweiterte Auswertung**. Ein Klassenwechsel erzeugt keinen neuen Track.
-Der Konsensanteil beschreibt die Übereinstimmung der Beobachtungen und ist keine
-kalibrierte Wahrscheinlichkeit für eine richtige Pose.
+Jedes Bauteil erhält eine eigene Track-ID. Jede gültige, vollständig sichtbare
+Erkennung zählt einmal. Der Erkennungsanteil ist **Anzahl der häufigsten Pose /
+Anzahl aller gültigen Erkennungen**. Bei **mehr als 90 %** wird diese Pose als
+**Erkannt** übernommen und ihr Bauteilzähler erhöht: 91/100 genügt, genau 90/100 nicht.
+Die Konfidenzen gewichten die Stimmen nicht; es gibt keine zusätzliche Mindestzahl
+oder Mindestdauer. Auch 1/1 ergibt 100 %. **Stimmen / Gesamt** und **Anteil** zeigen
+die Grundlage der Entscheidung. Unter **Erweiterte Auswertung** ist die Schwelle
+anpassbar. Beim Umstieg wird die alte gewichtete Schwelle auf 90 % zurückgesetzt.
+Ein Klassenwechsel erzeugt keinen neuen Track. Der Erkennungsanteil beschreibt die
+Übereinstimmung der Beobachtungen und ist keine kalibrierte Modellwahrscheinlichkeit.
 
 Sobald die **linkeste OBB-Ecke** die Abschlusslinie erreicht, friert das Ergebnis ein;
 die überquerende und alle späteren Beobachtungen beeinflussen die Pose nicht mehr.
-Mehrdeutige Zuordnungen liefern keinen sicheren Posezähler. Nach mehr als 0,5 s
-ohne passende Erkennung wird jeder begonnene Track als **Unvollständig** geführt;
-ein wieder auftauchender Track bleibt kurzzeitig gegen erneute Zählung gesperrt.
-Zu wenige oder widersprüchliche Beobachtungen ergeben **Unklar**.
+Mehrdeutige Zuordnungen zwischen Bauteilen liefern keinen bestätigten Posezähler.
+Nach mehr als 0,5 s ohne passende Erkennung wird der Track abgeschlossen und die
+Pose aus seinen bisherigen Stimmen entschieden. Ein Verlust vor der Abschlusslinie
+verhindert eine klare Pose nicht mehr. Dasselbe gilt bei Stop oder Geräteausfall.
+Ohne ausreichenden Erkennungsanteil lautet die Pose **Unklar**; ohne gültige Stimmen
+bei abgebrochener Verfolgung **Unvollständig**. Ein wieder auftauchender abgeschlossener
+Track bleibt kurzzeitig gegen erneute Zählung gesperrt und erhält keine neuen Stimmen.
 Auch ein nur einmal erkanntes Teil und ein Teil ohne gültige, vollständig sichtbare
 Beobachtung erscheinen in der Liste. Einzel-Erkennungen werden nicht als mögliche
 Fehldetektionen verworfen. Die Spalte **Grund** erklärt den Abschluss; die Übersicht
 zeigt die Gesamtzahl abgeschlossener Tracks einschließlich aller Fehlversuche.
-Diese Fälle sind auch in Sicherung und Export enthalten und erhöhen keinen Posezähler.
+Alle Fälle sind in Sicherung und Export enthalten. Nur **Erkannt** erhöht einen Posezähler.
+Für jeden neuen Track wird sofort das vollständige erste Erkennungsbild mit OBB,
+Pose und Konfidenz unter `erstbilder/` gespeichert, auch bei Verdeckung, Randanschnitt
+oder null gültigen Beobachtungen. Doppelklick auf **Erstbild** öffnet es; fehlt ein
+gültiger Posebeleg, öffnet auch der normale Doppelklick dieses Bild. Die ungeprüfte
+Ersterkennung bleibt getrennt vom Posekonsens. CSV/JSON enthalten `first_image`,
+`first_class_id` und `first_confidence`; der Export enthält die Erstbilder ebenfalls.
+CSV und JSON enthalten `observations`, `winning_observations`, `pose_observations`
+und `consensus` für Gesamtzahl, Mehrheitszahl, Stimmen je Pose und Erkennungsanteil.
+`pass_completed` hält getrennt fest, ob die Abschlusslinie beobachtet wurde;
+`reason` dokumentiert etwa einen Trackingverlust. Auch bei `pass_completed=false`
+kann eine klare Pose als **Erkannt** gezählt werden. Nicht bestätigte Kandidaten
+bleiben als **vorläufig** unter `candidate_class_id`/`candidate_pose` nachvollziehbar.
 Teile, die YOLO während der gesamten Durchfahrt nie erkennt, benötigen zur Erfassung
 eine unabhängige Anwesenheits- oder Referenzzählung.
 
@@ -109,6 +151,12 @@ Durchfahrt; für eine Genauigkeitsmessung werden zusätzlich bekannte Sollposen 
 - **OBB-Labels …:** Serien zuordnen, Anker und Bildauswahl prüfen, dann den Datensatz exportieren.
 - **YOLO-Training …:** Datensatz laden, Bilder prüfen und **Training starten** wählen.
 - **Modell …** und **YOLO Live-Erkennung:** Trainiertes OBB-Modell im Kamerabild verwenden.
+- **Doppelte Posen filtern** unter den Live-YOLO-Reglern ist standardmäßig aktiviert.
+  Bei überlappenden OBBs bleibt die Pose mit der höchsten Konfidenz; getrennte Teile
+  bleiben sichtbar. **Überlappung (IoU)** bestimmt die Schwelle (Standard 0,60):
+  kleinere Werte filtern stärker. Änderungen gelten nach Enter/Verlassen des Felds,
+  der Schalter sofort; beide Einstellungen bleiben nach einem Neustart erhalten.
+  Die Validation behält zusätzlich ihren eigenen Duplikatfilter bei IoU 0,60.
 - **Speicher bereinigen …:** Speicherbedarf analysieren und Bereinigung gezielt bestätigen.
 
 ## Hilfe

@@ -18,7 +18,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -31,6 +30,7 @@ from automated_image_capture.validation import ValidationSettings, points
 
 class ValidationPreview(QLabel):
     line_changed = pyqtSignal(float)
+    entry_changed = pyqtSignal(float)
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
@@ -38,6 +38,7 @@ class ValidationPreview(QLabel):
         self.line_editable = True
         self.line_fraction = 0.05
         self.entry_fraction = 0.75
+        self._drag_line = None
         self.source_size = (0, 0)
         self.tracks = []
 
@@ -82,20 +83,43 @@ class ValidationPreview(QLabel):
             )
 
     def _choose_line(self, event):
-        if not self.validation_visible or not self.line_editable:
+        if not self.validation_visible or not self.line_editable or self._drag_line is None:
             return
         x, y, width, height = self._image_rect()
         if width > 0 and y <= event.position().y() <= y + height:
-            fraction = max(0.0, min(0.5, (event.position().x() - x) / width))
-            self.line_changed.emit(fraction)
+            fraction = (event.position().x() - x) / width
+            if self._drag_line == "entry":
+                self.entry_changed.emit(max(self.line_fraction + 0.0001, min(0.9999, fraction)))
+            else:
+                self.line_changed.emit(max(0.0, min(self.entry_fraction - 0.0001, fraction)))
 
     def mousePressEvent(self, event):  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_line = None
+            x, y, width, height = self._image_rect()
+            if not (
+                self.validation_visible
+                and self.line_editable
+                and width > 0
+                and x <= event.position().x() <= x + width
+                and y <= event.position().y() <= y + height
+            ):
+                return
+            fraction = (event.position().x() - x) / width
+            self._drag_line = (
+                "entry"
+                if abs(fraction - self.entry_fraction) < abs(fraction - self.line_fraction)
+                else "exit"
+            )
             self._choose_line(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802
         if event.buttons() & Qt.MouseButton.LeftButton:
             self._choose_line(event)
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_line = None
 
 
 class ValidationPanel(QWidget):
@@ -105,6 +129,7 @@ class ValidationPanel(QWidget):
     export_requested = pyqtSignal(str)
     reset_requested = pyqtSignal()
     line_changed = pyqtSignal(float)
+    entry_changed = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -126,11 +151,17 @@ class ValidationPanel(QWidget):
         speed_row.addWidget(self.apply_speed)
         form.addRow("Bandgeschwindigkeit", speed_row)
         self.line = QDoubleSpinBox()
-        self.line.setRange(0, 50)
+        self.line.setRange(0, 74.99)
         self.line.setValue(5)
         self.line.setSuffix(" % vom linken Rand")
-        self.line.valueChanged.connect(lambda value: self.line_changed.emit(value / 100))
         form.addRow("Abschlusslinie", self.line)
+        self.entry = QDoubleSpinBox()
+        self.entry.setRange(5.01, 99.99)
+        self.entry.setValue(75)
+        self.entry.setSuffix(" % vom linken Rand")
+        self.line.valueChanged.connect(self._line_changed)
+        self.entry.valueChanged.connect(self._entry_changed)
+        form.addRow("Eintrittslinie", self.entry)
         self.output = QLineEdit(str(Path.home() / "Pictures" / "YOLOValidation"))
         browse = QPushButton("Ordner …")
         browse.clicked.connect(self._browse)
@@ -155,20 +186,15 @@ class ValidationPanel(QWidget):
             )
         )
         advanced = QFormLayout(self.parameters)
-        self.min_observations = QSpinBox()
-        self.min_observations.setRange(2, 1000)
-        self.min_observations.setValue(5)
-        self.min_duration = QDoubleSpinBox()
-        self.min_duration.setRange(0, 60)
-        self.min_duration.setValue(0.25)
-        self.min_duration.setSuffix(" s")
         self.min_consensus = QDoubleSpinBox()
-        self.min_consensus.setRange(51, 100)
-        self.min_consensus.setValue(70)
+        self.min_consensus.setDecimals(2)
+        self.min_consensus.setRange(50.01, 99.99)
+        self.min_consensus.setValue(90)
         self.min_consensus.setSuffix(" %")
-        advanced.addRow("Gültige Beobachtungen", self.min_observations)
-        advanced.addRow("Beobachtungsdauer", self.min_duration)
-        advanced.addRow("Konsensanteil", self.min_consensus)
+        self.min_consensus.setToolTip(
+            "Häufigste Pose / alle gültigen Erkennungen muss diesen Wert überschreiten."
+        )
+        advanced.addRow("Erkennungsanteil über", self.min_consensus)
         layout.addWidget(self.parameters)
         buttons = QHBoxLayout()
         self.start = QPushButton("Validation starten")
@@ -179,11 +205,13 @@ class ValidationPanel(QWidget):
         buttons.addWidget(self.stop)
         layout.addLayout(buttons)
         layout.addWidget(QLabel("Aktuell verfolgte Bauteile"))
-        self.active = self._table(["ID", "Rohpose", "Konsenspose", "N", "Status"])
+        self.active = self._table(["ID", "Rohpose", "Mehrheits-Pose", "Stimmen / Gesamt", "Status"])
         self.active.setMinimumHeight(90)
         layout.addWidget(self.active)
-        layout.addWidget(QLabel("Abgeschlossene Bauteile · Doppelklick öffnet den Beleg"))
-        self.results = self._table(["ID", "Zeit", "Pose", "Konsens", "N", "Status", "Grund"])
+        layout.addWidget(QLabel("Abgeschlossene Bauteile · Doppelklick öffnet Beleg oder Erstbild"))
+        self.results = self._table(
+            ["ID", "Zeit", "Pose", "Anteil", "Stimmen / Gesamt", "Status", "Grund", "Erstbild"]
+        )
         self.results.setMinimumHeight(150)
         self.results.cellDoubleClicked.connect(self._open_image)
         layout.addWidget(self.results)
@@ -193,7 +221,7 @@ class ValidationPanel(QWidget):
         root.addWidget(scroll, 1)
         # Counts and export/reset stay visible while the setup/results area scrolls.
         layout = root
-        layout.addWidget(QLabel("Summen · Konsensanteil ist keine Modellwahrscheinlichkeit"))
+        layout.addWidget(QLabel("Summen · Erkennungsanteil ist keine Modellwahrscheinlichkeit"))
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
@@ -229,17 +257,26 @@ class ValidationPanel(QWidget):
         for col, value in enumerate(values):
             table.setItem(row, col, QTableWidgetItem(str(value)))
 
+    def _line_changed(self, value):
+        self.entry.setMinimum(value + 0.01)
+        self.line_changed.emit(value / 100)
+
+    def _entry_changed(self, value):
+        self.line.setMaximum(value - 0.01)
+        self.entry_changed.emit(value / 100)
+
     def settings(self) -> ValidationSettings:
         return ValidationSettings(
             speed_mm_s=self.speed.value(),
             exit_fraction=self.line.value() / 100,
-            min_observations=self.min_observations.value(),
-            min_duration_s=self.min_duration.value(),
+            entry_fraction=self.entry.value() / 100,
             min_consensus=self.min_consensus.value() / 100,
         ).validated()
 
     def set_busy(self, busy):
-        for widget in (self.line, self.parameters, self.output, self.browse, self.reset):
+        for widget in (
+            self.line, self.entry, self.parameters, self.output, self.browse, self.reset
+        ):
             widget.setEnabled(not busy)
         self.start.setEnabled(not busy)
         self.stop.setEnabled(busy)
@@ -267,8 +304,8 @@ class ValidationPanel(QWidget):
                 [
                     track.track_id,
                     track.detection.class_name,
-                    f"{winner} ({track.consensus:.0%})",
-                    track.observations,
+                    f"{winner} ({track.consensus:.2%})",
+                    f"{track.counts.get(track.winner, 0)} / {track.observations}",
                     "Mehrdeutig" if track.ambiguous else "Beobachte",
                 ],
             )
@@ -284,15 +321,21 @@ class ValidationPanel(QWidget):
                 [
                     result.track_id,
                     datetime.fromtimestamp(result.finished_at).strftime("%H:%M:%S"),
-                    result.pose,
-                    f"{result.consensus:.0%}",
-                    result.observations,
+                    result.pose
+                    if result.status == "Erkannt" or result.candidate_pose is None
+                    else f"{result.candidate_pose} (vorläufig)",
+                    f"{result.consensus:.2%}",
+                    f"{result.winning_observations} / {result.observations}",
                     result.status,
                     result.reason,
+                    "Öffnen" if result.first_image else "–",
                 ],
             )
             for column in range(self.results.columnCount()):
                 self.results.item(index, column).setToolTip(result.reason)
+            self.results.item(index, 7).setToolTip(
+                "Erste Erkennung prüfen, auch bei Verdeckung oder ohne gültige Pose."
+            )
         totals = controller.tracker.pose_counts() if controller.tracker else {}
         statuses = (
             controller.tracker.counts() if controller.tracker else {"Unklar": 0, "Unvollständig": 0}
@@ -335,11 +378,12 @@ class ValidationPanel(QWidget):
             return
         self.reset_requested.emit()
 
-    def _open_image(self, row, _column):
+    def _open_image(self, row, column):
         controller = self._controller
         if controller is not None and controller.store is not None:
             record = controller.tracker.results[row]
-            if record.image:
-                path = controller.store.directory / record.image
+            image = record.first_image if column == 7 else record.image or record.first_image
+            if image:
+                path = controller.store.directory / image
                 if path.is_file():
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))

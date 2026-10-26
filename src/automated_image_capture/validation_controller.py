@@ -16,7 +16,11 @@ from automated_image_capture.inference import (
     LiveInferenceConfig,
 )
 from automated_image_capture.models import ConnectionState
-from automated_image_capture.validation import ValidationSettings, ValidationTracker
+from automated_image_capture.validation import (
+    VOTE_POLICY_VERSION,
+    ValidationSettings,
+    ValidationTracker,
+)
 from automated_image_capture.validation_store import ValidationSessionStore
 
 
@@ -132,7 +136,12 @@ class ValidationController(QObject):
     def _open_session(self) -> None:
         assert self.model is not None
         if self.store is None:
-            self.tracker = ValidationTracker(self.settings, self.model.classes, self._evidence)
+            self.tracker = ValidationTracker(
+                self.settings,
+                self.model.classes,
+                self._evidence,
+                first_evidence=self._first_evidence,
+            )
             self.store = ValidationSessionStore(self._root, self.snapshot(), self)
             self.store.failed.connect(self._storage_error)
             self.store.exported.connect(self.exported.emit)
@@ -197,6 +206,10 @@ class ValidationController(QObject):
     def _evidence(self, tid, detection, image) -> None:
         if self.store is not None:
             self.store.evidence(tid, detection, image)
+
+    def _first_evidence(self, tid, detection, image) -> None:
+        if self.store is not None:
+            self.store.first_evidence(tid, detection, image)
 
     def _band_status(self, status) -> None:
         self._last_band = time.monotonic()
@@ -268,6 +281,12 @@ class ValidationController(QObject):
     def snapshot(self) -> dict:
         return {
             "format_version": 1,
+            "vote_policy": {
+                "version": VOTE_POLICY_VERSION,
+                "method": "detection_count",
+                "comparison": ">",
+                "threshold": self.settings.min_consensus,
+            },
             "updated_at": datetime.now().astimezone().isoformat(),
             "model": asdict(self.model) if self.model is not None else {"classes": {}},
             "settings": asdict(self.settings),

@@ -18,6 +18,15 @@ keinen Roboter und kein Roboterprogramm.
 
 ## YOLO Validation: Datenfluss und Grenzen
 
+`LiveInferenceConfig.duplicate_filter` aktiviert standardmäßig die klassenunabhängige
+OBB-Unterdrückung vor Overlay und Ausgabe von `InferenceFrame.detections`.
+`duplicate_iou` (Standard 0,60) verwendet die tatsächlichen gedrehten Polygone;
+die jeweils stärkste Erkennung bleibt erhalten. Schalter und Schwelle stehen unter
+den Live-YOLO-Reglern, werden in QSettings gespeichert und wirken ohne Modellneuladen.
+Während der Validation sind sie gesperrt; die Inferenzkonfiguration wird in den
+Sitzungsmetadaten mitgespeichert. Der Tracker nutzt denselben Filter zusätzlich mit
+seiner bisherigen festen IoU-Schwelle 0,60, auch wenn der Livefilter ausgeschaltet ist.
+
 Der Reiter verwendet dieselbe Modellauswahl und denselben Inferenzworker wie die
 Liveerkennung. `InferenceModelInfo` meldet beim Laden Dateipfad, SHA-256, Modelltyp
 und Klassenliste. `InferenceFrame.raw_image` liefert zusätzlich das unveränderte
@@ -53,21 +62,36 @@ Positionsvorhersage aus gemessener Bildgeschwindigkeit und Hungarian-Zuordnung
 Abstand, vertikale Verschiebung und Flächenverhältnis begrenzen zulässige Zuordnungen.
 Bei konkurrierenden Zuordnungen mit weniger als 0,12 Kostendifferenz werden
 keine Klassenstimmen ausgetauscht; die betroffenen Tracks bleiben unsicher.
-Neue Bauteile müssen den rechten Eintrittsbereich (letzte 25 % der Breite) berühren.
+Neue Bauteile müssen den rechten Eintrittsbereich berühren (standardmäßig letzte
+25 % der Breite). Eintritts- und Abschlusslinie sind im Livebild und als Prozentwerte
+einstellbar; es gilt 0 ≤ Abschluss < Eintritt < 100 %. Während eines Laufs sind beide
+gesperrt. Die gespeicherten Einstellungen und Sitzungsmetadaten enthalten beide Werte.
 Eine Verschiebung im Bild wird in Pixeln pro Zeit gemessen, nicht aus einer
 unbekannten Millimeter-pro-Pixel-Kalibrierung abgeleitet.
 
-Nur vollständig sichtbare OBBs rechts der Abschlusslinie stimmen ab. Die
-Klassenstimmen summieren ihre jeweiligen YOLO-Konfidenzen. Ein eindeutiges Ergebnis
-benötigt standardmäßig fünf Beobachtungen, 0,25 s Beobachtungsdauer und 70 % Konsens.
-Die Abschlussbeobachtung selbst wird ausgeschlossen. Alle verlorenen Tracks
-werden nach 0,5 s unvollständig abgeschlossen und noch bis zu 1,5 s länger als
-gesperrte Identität gehalten, um kurzfristiges Wiederauftauchen nicht erneut zu zählen.
+Nur vollständig sichtbare OBBs rechts der Abschlusslinie stimmen ab. Jede gültige
+Erkennung zählt genau einmal; Gewinner und Anteil werden allein aus `counts`
+berechnet. Die Konfidenzsummen dienen nur dem Konfidenzmittel und der Belegauswahl.
+Die eindeutige Pose benötigt standardmäßig **mehr als 90 %** der gültigen Stimmen,
+ohne zusätzliche Mindestdauer oder Mindestzahl. Genau 90 % erfüllt die Regel nicht.
+Mehrdeutige Identitätszuordnungen bleiben von einer bestätigten Pose ausgeschlossen.
+Die Abschlussbeobachtung selbst wird ausgeschlossen. Verlorene Tracks werden nach
+0,5 s abgeschlossen, aus den bisherigen Stimmen bewertet und noch bis zu 1,5 s
+länger als gesperrte Identität gehalten, um kurzfristiges Wiederauftauchen nicht
+erneut zu zählen. Auch bei Stop/Geräteausfall bleiben ausreichende Mehrheiten gültig.
 Die Aussetzerfrist wird nach der Zuordnung des aktuellen Bildes geprüft. Eine
 geometrisch eindeutig zugeordnete OBB an der Abschlusslinie schließt den Track
 deshalb regulär aus den vorherigen Stimmen ab, auch wenn das aktuelle Bild verspätet
-eintrifft. Bereits als verloren abgeschlossene Tracks werden nicht nachträglich
-erfolgreich gezählt; fehlende oder geometrisch unpassende Erkennungen bleiben unvollständig.
+eintrifft. Bereits abgeschlossene Tracks werden nicht nachträglich verändert.
+Bei vorhandenen Stimmen unterhalb oder auf der Schwelle ist das Ergebnis `Unklar`;
+ohne gültige Stimmen bei abgebrochener Verfolgung `Unvollständig`.
+`winning_observations` und `pose_observations` sichern die Mehrheitszahl und die
+Stimmen pro Klasse. `pass_completed` dokumentiert unabhängig von der Pose, ob die
+Abschlusslinie beobachtet wurde; ein Trackingverlust mit klarer Mehrheit kann daher
+`Erkannt` sein und einen Posezähler erhöhen. Der ursprüngliche Abschlussgrund bleibt erhalten.
+`session.json` nennt die Regel unter `vote_policy` (`detection_count_v1`, Vergleich `>`).
+Die QSettings-Migration ignoriert alte Mindestzahl/-dauer und setzt die zuvor gewichtete
+Schwelle einmalig auf 90 %. Danach bleiben angepasste Zählschwellen gespeichert.
 Jeder im Eintrittsbereich angelegte Track wird abgeschlossen, auch bei nur einem
 Treffer oder ohne gültige Klassenstimme. Es gibt keinen stillen Mindesttrefferfilter.
 `reason` benennt Einzel-Erkennung, fehlende gültige Beobachtungen, mehrdeutige
@@ -89,7 +113,14 @@ wird nicht verändert; Dauerlauf entspricht dem bisherigen manuellen Rechts-Befe
 Aufnahme- und Validation-Steuerung sind gegenseitig gesperrt.
 
 `ValidationSessionStore` schreibt seriell im Hintergrund mit höchstens 16
-ausstehenden Schreibaufträgen. Je Track/Klasse wird nur der bislang beste gültige
+ausstehenden Schreibaufträgen. Beim Anlegen jedes Tracks wird das vollständige
+Erstbild unabhängig von der Gültigkeit als Posebeobachtung unter `erstbilder/`
+gesichert. Es zeigt die ursprüngliche OBB/Klasse/Konfidenz mit dem Hinweis
+„Erste Erkennung (ungeprüft)“ und wird durch spätere bessere Beobachtungen nicht
+überschrieben. `first_image`, `first_class_id` und `first_confidence` stehen in
+Ergebnis-JSON und Export-CSV; die Erstbilder werden mitexportiert. Diese Sicherung
+liefert keine zusätzliche Poseabstimmung und verändert weder Status noch Zähler.
+Je Track/Klasse wird weiterhin nur der bislang beste gültige
 Beleg vorgehalten; bei Abschluss wird das Bild der gewählten Pose unter `bilder/`
 fixiert. `part_*.json` hält einzelne Ergebnisse, `session.json` wird atomar ersetzt.
 Ein Export wird hinter den zugehörigen Schreibaufträgen eingeordnet und verwendet

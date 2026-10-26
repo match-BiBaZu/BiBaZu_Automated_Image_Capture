@@ -146,6 +146,160 @@ def test_worker_enables_drive_before_sending_relative_move() -> None:
     assert worker._move_command_sent
 
 
+def stale_status_plc():
+    from automated_image_capture.hardware.conveyor import STATUS_SYMBOLS
+
+    plc = FakePlc()
+    plc.values.update(dict.fromkeys(STATUS_SYMBOLS, 0))
+    plc.values.update({
+        "MAIN.ConveyorServoVelocityOnly": True,
+        "MAIN.ConveyorCaptureInterfaceVersion": 1,
+        "MAIN.CalibrationStatusCode": 5,
+        "MAIN.StepperInternalPosition": 1459326308,
+    })
+    original_write = plc.write_list_by_name
+
+    def write(values, *, cache_symbol_info):
+        result = original_write(values, cache_symbol_info=cache_symbol_info)
+        plc.values.update(values)
+        return result
+
+    plc.write_list_by_name = write
+    return plc
+
+
+def test_startup_clears_only_retained_diagnostic_without_drive_commands():
+    plc = stale_status_plc()
+    worker = ConveyorWorker(AppSettings())
+    events = QSignalSpy(worker.event_message)
+    result = worker._clear_stale_startup_status(plc, dict(plc.values), None)
+    assert result["MAIN.CalibrationStatusCode"] == 0
+    assert plc.writes == [{"MAIN.CalibrationStatusCode": 0}]
+    assert result["MAIN.StepperInternalPosition"] == 1459326308
+    assert not result["MAIN.StepperControlEnable"]
+    assert len(events) == 1 and "quittiert" in events[0][0]
+
+
+@pytest.mark.parametrize(("symbol", "value"), [
+    ("MAIN.CalibrationStatusCode", 4),
+    ("MAIN.ConveyorServoVelocityOnly", False),
+    ("MAIN.ConveyorCaptureInterfaceVersion", 0),
+    ("MAIN.CalibrationError", True),
+    ("MAIN.StepperPosError", True),
+    ("MAIN.ConveyorServoFaultCode", 12),
+    ("MAIN.ConveyorServoState", 10),
+    ("MAIN.CalibrationBusy", True),
+    ("MAIN.StepperPosBusy", True),
+    ("MAIN.StepperControlEnable", True),
+    ("MAIN.GuiConveyorEnabled", True),
+    ("MAIN.GuiConveyorCalibrationMode", True),
+    ("MAIN.ConveyorServo1TargetVelocity", 100),
+    ("MAIN.ConveyorServo2TargetVelocity", -100),
+])
+def test_startup_does_not_acknowledge_active_drive_or_fault(symbol, value):
+    plc = stale_status_plc()
+    plc.values[symbol] = value
+    worker = ConveyorWorker(AppSettings())
+    result = worker._clear_stale_startup_status(plc, dict(plc.values), None)
+    assert not plc.writes
+    assert result["MAIN.CalibrationStatusCode"] == (value if symbol.endswith("StatusCode") else 5)
+
+
+@pytest.mark.parametrize(("symbol", "value"), [
+    ("MAIN.StepperPosError", True),
+    ("MAIN.StepperInternalPosition", 1459326309),
+    ("MAIN.ConveyorServo2TargetVelocity", 100),
+])
+def test_startup_rechecks_faults_and_position_before_acknowledging(symbol, value):
+    plc = stale_status_plc()
+    original_sample = dict(plc.values)
+    plc.values[symbol] = value
+    worker = ConveyorWorker(AppSettings())
+    result = worker._clear_stale_startup_status(plc, original_sample, None)
+    assert not plc.writes
+    assert result[symbol] == value
+    assert result["MAIN.CalibrationStatusCode"] == 5
+
+
+def test_startup_preserves_retained_status_when_write_is_rejected():
+    plc = stale_status_plc()
+    plc.write_list_by_name = lambda values, **_: dict.fromkeys(values, "write denied")
+    worker = ConveyorWorker(AppSettings())
+    events = QSignalSpy(worker.event_message)
+    result = worker._clear_stale_startup_status(plc, dict(plc.values), None)
+    assert result["MAIN.CalibrationStatusCode"] == 5
+    assert "nicht quittiert" in events[0][0]
+
+
+def test_startup_reports_reasserted_fault_instead_of_hiding_it():
+    plc = stale_status_plc()
+    original_write = plc.write_list_by_name
+
+    def write(values, **kwargs):
+        result = original_write(values, **kwargs)
+        plc.values["MAIN.CalibrationStatusCode"] = 5
+        plc.values["MAIN.StepperPosError"] = True
+        return result
+
+    plc.write_list_by_name = write
+    worker = ConveyorWorker(AppSettings())
+    result = worker._clear_stale_startup_status(plc, dict(plc.values), None)
+    assert result["MAIN.CalibrationStatusCode"] == 5
+    assert result["MAIN.StepperPosError"]
+
+
+@pytest.mark.parametrize("pending", ["move", "continuous", "queued", "stop", "cancel"])
+def test_startup_skips_acknowledgement_with_pending_app_command(pending):
+    plc = stale_status_plc()
+    worker = ConveyorWorker(AppSettings())
+    if pending == "move":
+        worker._requested_move = ConveyorMove(7, 10, 10, 30, 30, 10, 30, "right")
+    elif pending == "continuous":
+        worker._continuous_requested = True
+    elif pending == "queued":
+        worker.enqueue_continuous(10)
+    elif pending == "stop":
+        worker._stop.set()
+    else:
+        worker._cancel_motion.set()
+    worker._clear_stale_startup_status(plc, dict(plc.values), None)
+    assert not plc.writes
+
+
+def test_worker_clears_retained_status_on_connection_and_publishes_verified_value(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    from automated_image_capture.hardware import conveyor
+
+    plc = stale_status_plc()
+    plc.open = lambda: None
+    plc.close = lambda: None
+    plc.read_state = lambda: (5, 0)
+    monkeypatch.setitem(sys.modules, "pyads", SimpleNamespace(
+        Connection=lambda *_: plc, set_timeout=lambda _: None,
+    ))
+    monkeypatch.setattr(conveyor, "IDLE_POLL_SECONDS", 0)
+    worker = ConveyorWorker(AppSettings())
+    statuses = []
+
+    def observed(status):
+        statuses.append(status)
+        if len(statuses) == 1:
+            # A later status must not trigger another automatic acknowledgement.
+            plc.values["MAIN.CalibrationStatusCode"] = 5
+        else:
+            worker.stop()
+
+    worker.status_changed.connect(observed)
+    worker.run()
+    assert [status.status_code for status in statuses] == [0, 5]
+    assert sum("MAIN.CalibrationStatusCode" in write for write in plc.writes) == 1
+    assert all(not write.get("MAIN.GuiConveyorReset") for write in plc.writes)
+    assert all(not write.get("MAIN.GuiConveyorEnabled") for write in plc.writes)
+    assert all(not write.get("MAIN.GuiConveyorCalibrationMode") for write in plc.writes)
+
+
 def test_worker_stop_disables_positioning_mode() -> None:
     plc = FakePlc()
     worker = ConveyorWorker(AppSettings())
@@ -211,6 +365,45 @@ def test_adapter_computes_each_target_from_origin_not_previous_rounding() -> Non
     assert second.delta_full_steps == 31
 
 
+@pytest.mark.parametrize("direction", ["left", "right"])
+def test_updated_capture_direction_controls_outward_and_return_moves(direction):
+    from types import SimpleNamespace
+
+    moves = []
+    adapter = ConveyorAdapter(AppSettings(conveyor_forward_direction="right"))
+    adapter._state = ConnectionState.CONNECTED
+    adapter._worker = SimpleNamespace(enqueue_move=moves.append)
+    adapter._thread = SimpleNamespace(isRunning=lambda: True)
+    adapter._origin_position = 1000
+    adapter._status = ConveyorStatus(
+        internal_position=1000, calibration_valid=True, mm_per_full_step=1,
+    )
+    assert adapter.set_forward_direction(direction)
+    adapter.request_offset(10, 10)
+    assert moves[-1].plc_direction == direction
+    assert moves[-1].delta_full_steps == 10
+    end_position = 1000 + effective_direction_sign(direction, False) * 10 * 64
+    adapter._on_status(ConveyorStatus(
+        internal_position=end_position, calibration_valid=True, mm_per_full_step=1,
+        completed_sequence=moves[-1].sequence,
+    ))
+    assert adapter.status.forward_direction == direction
+    adapter.request_offset(0, 10)
+    assert moves[-1].plc_direction == ("right" if direction == "left" else "left")
+    assert moves[-1].delta_full_steps == -10
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("busy", True), ("preparing_drive", True), ("requested_sequence", 7),
+    ("continuous_requested", True), ("continuous_running", True),
+])
+def test_direction_change_cannot_modify_pending_or_active_move(field, value):
+    adapter = ConveyorAdapter(AppSettings(conveyor_forward_direction="right"))
+    setattr(adapter._status, field, value)
+    assert not adapter.set_forward_direction("left")
+    assert adapter.config.conveyor_forward_direction == "right"
+
+
 def test_adapter_treats_plc_position_zero_as_a_real_position() -> None:
     class DummyThread:
         @staticmethod
@@ -241,6 +434,41 @@ def test_adapter_treats_plc_position_zero_as_a_real_position() -> None:
 
     assert worker.move is not None
     assert worker.move.delta_full_steps == 1
+
+
+@pytest.mark.parametrize("position", [0, 1459326308])
+def test_origin_can_be_set_in_standby_after_historical_fault_without_motion(position):
+    adapter = ConveyorAdapter(AppSettings(conveyor_forward_direction="right"))
+    adapter._state = ConnectionState.CONNECTED
+    adapter._status = ConveyorStatus(internal_position=position, status_code=5)
+    changed = QSignalSpy(adapter.status_changed)
+    assert adapter.set_current_as_origin()
+    assert adapter.origin_position == position
+    assert adapter.status.logical_offset_mm == 0
+    assert len(changed) == 1
+    # No worker or PLC connection is needed: this is a local coordinate reference.
+    assert adapter._worker is None
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("internal_position", None), ("busy", True), ("preparing_drive", True),
+    ("requested_sequence", 7), ("continuous_requested", True),
+    ("continuous_running", True), ("error", True), ("servo_fault_code", 12),
+])
+def test_origin_rejects_active_fault_or_pending_motion(field, value):
+    adapter = ConveyorAdapter(AppSettings())
+    adapter._state = ConnectionState.CONNECTED
+    adapter._status = ConveyorStatus(internal_position=1234)
+    setattr(adapter._status, field, value)
+    assert not adapter.set_current_as_origin()
+    assert adapter.origin_position is None
+
+
+def test_origin_rejects_disconnected_encoder_position():
+    adapter = ConveyorAdapter(AppSettings())
+    adapter._status = ConveyorStatus(internal_position=1234)
+    assert not adapter.set_current_as_origin()
+    assert adapter.origin_position is None
 
 
 def test_adapter_marks_position_feedback_verified_only_after_observed_change() -> None:

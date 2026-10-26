@@ -193,6 +193,10 @@ class ConveyorControlCard(DeviceCard):
         mapping_row = QHBoxLayout()
         mapping_row.addWidget(QLabel("Vorwärtsrichtung"))
         self.forward_direction = QComboBox()
+        self.forward_direction.setToolTip(
+            "Hinfahrt der automatischen Bildaufnahme; die Rückfahrt erfolgt entgegengesetzt. "
+            "Die Auswahl allein bewegt das Band nicht."
+        )
         self.forward_direction.addItem("Bitte testen …", "")
         self.forward_direction.addItem("Links ist vorwärts", "left")
         self.forward_direction.addItem("Rechts ist vorwärts", "right")
@@ -215,6 +219,11 @@ class ConveyorControlCard(DeviceCard):
 
     def set_status(self, status: ConveyorStatus) -> None:
         self._status = status
+        blocked = self.forward_direction.blockSignals(True)
+        self.forward_direction.setCurrentIndex(
+            max(0, self.forward_direction.findData(status.forward_direction))
+        )
+        self.forward_direction.blockSignals(blocked)
         offset = "–" if status.logical_offset_mm is None else f"{status.logical_offset_mm:.3f} mm"
         calibration = (
             f"gültig · {status.mm_per_full_step:.8f} mm/Vollschritt"
@@ -230,6 +239,9 @@ class ConveyorControlCard(DeviceCard):
             else "Standby"
         )
         feedback = "geprüft" if status.position_feedback_verified else "noch ungeprüft"
+        direction = {"left": "Links", "right": "Rechts"}.get(
+            status.forward_direction, "nicht gewählt"
+        )
         self.details.setText(
             f"Motoren: {status.motor_count} · Geschwindigkeitssteuerung: "
             f"{'ja' if status.velocity_only else 'nein'} · SPS-Fehler {status.servo_fault_code}\n"
@@ -238,7 +250,8 @@ class ConveyorControlCard(DeviceCard):
             f"{'ja' if status.busy else 'nein'} / "
             f"{'ja' if status.warning else 'nein'} / {'ja' if status.error else 'nein'}\n"
             f"SPS-Position: {internal} · Rückmeldung: {feedback}\n"
-            f"Logischer Offset: {offset} · Status {status.status_code}"
+            f"Logischer Offset: {offset} · Status {status.status_code}\n"
+            f"Aufnahme-Hinfahrt: {direction}"
         )
         self._update_controls()
 
@@ -249,21 +262,52 @@ class ConveyorControlCard(DeviceCard):
     def _update_controls(self) -> None:
         if not hasattr(self, "left_button"):
             return
-        controls_available = (
+        idle = (
             self.state is ConnectionState.CONNECTED
-            and self._status.calibration_valid
             and not self._status.busy
             and not self._status.preparing_drive
-            and not self._status.error
-            and self._status.status_code not in {4, 5}
+            and self._status.requested_sequence is None
+            and not self._status.continuous_requested
+            and not self._status.continuous_running
+        )
+        fault_free = not self._status.error and self._status.servo_fault_code == 0
+        # The tandem PLC retains CalibrationStatusCode=5 after its error clears.
+        # A manual jog runs the existing stopped preparation and PLC checks anew.
+        historical_drive_error = (
+            self._status.velocity_only
+            and self._status.capture_interface_version == 1
+            and self._status.status_code == 5
+            and fault_free
+        )
+        controls_available = (
+            idle
+            and self._status.calibration_valid
+            and self._status.mm_per_full_step > 0
+            and fault_free
+            and (self._status.status_code not in {4, 5} or historical_drive_error)
         )
         self.left_button.setEnabled(controls_available)
         self.right_button.setEnabled(controls_available)
         self.jog_distance.setEnabled(controls_available)
         self.origin_button.setEnabled(
-            controls_available and self._status.internal_position is not None
+            idle and fault_free and self._status.internal_position is not None
         )
-        self.forward_direction.setEnabled(not self._status.busy)
+        self.origin_button.setToolTip(
+            "Übernimmt die aktuelle Encoderposition als lokalen Nullpunkt; bewegt das Band nicht."
+        )
+        self.jog_distance.setToolTip(
+            "Letzter SPS-Status 5, aktuell kein Antriebsfehler. "
+            "Eine manuelle Testfahrt prüft den Antrieb erneut."
+            if historical_drive_error
+            else "Gewünschte relative Fahrstrecke"
+        )
+        self.forward_direction.setEnabled(
+            not self._status.busy
+            and not self._status.preparing_drive
+            and self._status.requested_sequence is None
+            and not self._status.continuous_requested
+            and not self._status.continuous_running
+        )
         self.stop_button.setEnabled(self.state is ConnectionState.CONNECTED)
 
 
@@ -433,6 +477,10 @@ class AcquisitionCard(QGroupBox):
         self.summary = QLabel("Noch keine Aufnahmeeinstellungen geladen.")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
+        self.conveyor_direction = QLabel()
+        self.conveyor_direction.setWordWrap(True)
+        self.conveyor_direction.hide()
+        layout.addWidget(self.conveyor_direction)
 
         self._running = False
         self._resume_available = False
@@ -473,6 +521,17 @@ class AcquisitionCard(QGroupBox):
         self.status = QLabel("Bereit.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+
+    def set_conveyor_direction(self, direction: str, enabled: bool) -> None:
+        names = {"left": "Links", "right": "Rechts"}
+        if direction in names:
+            back = "right" if direction == "left" else "left"
+            self.conveyor_direction.setText(
+                f"Band-Hinfahrt: {names[direction]} · Rückfahrt: {names[back]}"
+            )
+        else:
+            self.conveyor_direction.setText("Bandrichtung: bitte in der Förderbandkarte wählen.")
+        self.conveyor_direction.setVisible(enabled)
 
     def set_settings(self, settings: AcquisitionSettings) -> None:
         count = len(build_capture_points(settings))

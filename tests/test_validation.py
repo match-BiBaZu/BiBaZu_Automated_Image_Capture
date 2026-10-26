@@ -6,6 +6,7 @@ import time
 from dataclasses import replace
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -37,6 +38,35 @@ def detection(x, cid=0, y=120, confidence=0.9, half_width=25):
             (x - half_width, y + 20),
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("exit_fraction", "entry_fraction", "positions"),
+    [(0.25, 0.4, (450, 410, 350, 270)), (0.6, 0.85, (900, 820, 740, 620))],
+)
+def test_tracker_uses_adjusted_entry_and_exit_lines(exit_fraction, entry_fraction, positions):
+    settings = ValidationSettings(
+        exit_fraction=exit_fraction,
+        entry_fraction=entry_fraction,
+    )
+    tracker = ValidationTracker(settings, CLASSES)
+    tracker.update(IMAGE, (detection(entry_fraction * 1000 - 30),), 0)
+    assert not tracker.tracks
+    for step, x in enumerate(positions, 1):
+        tracker.update(IMAGE, (detection(x),), step * 0.1)
+    assert len(tracker.results) == 1
+    assert tracker.results[0].status == "Erkannt"
+    assert tracker.results[0].reason == "Abschlusslinie"
+    assert tracker.results[0].observations == 3
+
+
+@pytest.mark.parametrize(
+    ("exit_fraction", "entry_fraction"),
+    [(-0.01, 0.75), (0.5, 0.5), (0.6, 0.4), (0.05, 1), (float("nan"), 0.75)],
+)
+def test_validation_rejects_out_of_bounds_or_unordered_lines(exit_fraction, entry_fraction):
+    with pytest.raises(ValueError, match="Abschlusslinie muss links"):
+        ValidationSettings(exit_fraction=exit_fraction, entry_fraction=entry_fraction).validated()
 
 
 def test_multiple_parts_keep_identity_despite_class_and_detection_order_changes():
@@ -105,20 +135,22 @@ def test_delayed_exit_frame_keeps_two_parts_separate():
     assert all(r.observations == 12 and r.consensus == 1 for r in results)
 
 
-def test_stable_votes_do_not_override_actual_loss_or_wrong_geometry():
+def test_stable_pose_survives_loss_without_adopting_later_or_unrelated_votes():
     for actual_missing_frame in (False, True):
         tracker = ValidationTracker(ValidationSettings(exit_fraction=0.35), CLASSES)
         for step in range(12):
             tracker.update(IMAGE, (detection(900 - 40 * step, 2),), step * 0.1)
         if actual_missing_frame:
             tracker.update(IMAGE, (), 1.7)
-            tracker.update(IMAGE, (detection(180, 2),), 1.8)
+            tracker.update(IMAGE, (detection(180, 1),), 1.8)
         else:
             tracker.update(IMAGE, (detection(220, 2, y=280),), 1.7)
         assert len(tracker.results) == 1
-        assert tracker.results[0].status == "Unvollständig"
+        assert tracker.results[0].status == "Erkannt"
+        assert tracker.results[0].class_id == 2
+        assert not tracker.results[0].pass_completed
         assert tracker.results[0].observations == 12
-        assert tracker.pose_counts() == {0: 0, 1: 0, 2: 0}
+        assert tracker.pose_counts() == {0: 0, 1: 0, 2: 1}
 
 
 def test_short_gap_bridges_but_lost_part_cannot_restart_in_middle():
@@ -129,10 +161,12 @@ def test_short_gap_bridges_but_lost_part_cannot_restart_in_middle():
     tracker.update(IMAGE, (detection(750),), 1.3)
     assert len(tracker.tracks) == 1
     tracker.update(IMAGE, (), 2)
-    assert tracker.results[0].status == "Unvollständig"
+    assert tracker.results[0].status == "Erkannt"
+    assert tracker.results[0].candidate_class_id == 0
+    assert tracker.results[0].candidate_pose == "Pose A"
     tracker.update(IMAGE, (detection(600),), 2.1)
     assert all(t.finalized for t in tracker.tracks.values())
-    assert tracker.pose_counts() == {0: 0, 1: 0, 2: 0}
+    assert tracker.pose_counts() == {0: 1, 1: 0, 2: 0}
 
 
 def test_single_clipped_entry_is_recorded_without_supplying_pose_votes():
@@ -144,6 +178,9 @@ def test_single_clipped_entry_is_recorded_without_supplying_pose_votes():
     result = tracker.results[0]
     assert result.status == "Unvollständig" and result.class_id is None
     assert result.observations == 0 and result.image is None
+    assert result.first_image == "erstbilder/000001.png"
+    assert result.first_class_id == 0 and result.first_confidence == 0.9
+    assert result.candidate_pose is None and result.candidate_class_id is None
     assert "nur eine Erkennung" in result.reason
     assert "keine gültige vollständig sichtbare Beobachtung" in result.reason
     tracker.update(IMAGE, (detection(500),), 3)
@@ -156,14 +193,14 @@ def test_single_full_entry_is_recorded_once_after_loss_and_cannot_be_counted_aga
     tracker.update(IMAGE, (detection(900),), 1)
     results = tracker.update(IMAGE, (), 1.6)
     assert len(results) == 1 and results[0].observations == 1
-    assert results[0].status == "Unvollständig"
+    assert results[0].status == "Erkannt"
     assert "nur eine Erkennung" in results[0].reason
     tracker.update(IMAGE, (detection(890, 1),), 1.7)
     tracker.update(IMAGE, (), 2.3)
     assert tracker.stop(2.4) == []
     assert tracker.results == results
-    assert tracker.counts() == {"Unklar": 0, "Unvollständig": 1}
-    assert tracker.pose_counts() == {0: 0, 1: 0, 2: 0}
+    assert tracker.counts() == {"Unklar": 0, "Unvollständig": 0}
+    assert tracker.pose_counts() == {0: 1, 1: 0, 2: 0}
 
 
 def test_stop_records_every_entry_even_with_only_one_detection_per_part():
@@ -171,11 +208,12 @@ def test_stop_records_every_entry_even_with_only_one_detection_per_part():
     tracker.update(IMAGE, (detection(900), detection(990, 1, y=280)), 1)
     results = tracker.stop(1.1)
     assert [(r.track_id, r.status) for r in results] == [
-        (1, "Unvollständig"),
+        (1, "Erkannt"),
         (2, "Unvollständig"),
     ]
     assert [r.observations for r in results] == [1, 0]
-    assert tracker.counts() == {"Unklar": 0, "Unvollständig": 2}
+    assert tracker.counts() == {"Unklar": 0, "Unvollständig": 1}
+    assert tracker.pose_counts() == {0: 1, 1: 0, 2: 0}
     assert tracker.stop(1.2) == []
 
 
@@ -202,7 +240,7 @@ def test_lost_part_reappearing_in_entry_area_is_not_born_again():
     tracker.update(IMAGE, (detection(890, 1),), 1.8)
     assert list(tracker.tracks) == [1]
     assert len(tracker.results) == 1
-    assert tracker.results[0].status == "Unvollständig"
+    assert tracker.results[0].status == "Erkannt"
 
 
 def test_ambiguous_assignment_never_transfers_class_votes():
@@ -218,7 +256,7 @@ def test_ambiguous_assignment_never_transfers_class_votes():
     assert all(r.status != "Erkannt" for r in tracker.results)
 
 
-def test_insufficient_observations_are_unclear_and_duplicate_timestamps_ignored():
+def test_balanced_votes_are_unclear_and_duplicate_timestamps_ignored():
     tracker = ValidationTracker(ValidationSettings(), CLASSES)
     for step, x in enumerate((900, 850, 800)):
         tracker.update(IMAGE, (detection(x),), step * 0.1)
@@ -228,25 +266,40 @@ def test_insufficient_observations_are_unclear_and_duplicate_timestamps_ignored(
     for step, x in enumerate((730, 650, 570, 500), 3):
         tracker.update(IMAGE, (detection(x, 1),), step * 0.1)
     assert tracker.results[0].status == "Unklar"
-    assert "Konsensanteil zu niedrig" in tracker.results[0].reason
+    assert "Erkennungsanteil überschreitet die Schwelle nicht" in tracker.results[0].reason
 
 
-@pytest.mark.parametrize(
-    ("settings", "reason"),
-    [
-        (ValidationSettings(min_observations=100), "zu wenige gültige Beobachtungen"),
-        (ValidationSettings(min_duration_s=5), "Beobachtungsdauer zu kurz"),
-    ],
-)
-def test_failed_pose_requirements_are_recorded_with_reason(settings, reason):
-    tracker = ValidationTracker(settings, CLASSES)
-    for step, x in enumerate(range(900, -1, -60)):
-        tracker.update(IMAGE, (detection(x),), step * 0.1)
+@pytest.mark.parametrize("majority", [90, 91, 100])
+def test_pose_decision_uses_strictly_over_90_percent_of_detection_counts(majority):
+    tracker = ValidationTracker(ValidationSettings(), CLASSES)
+    for step in range(100):
+        cid = 0 if step < majority else 1
+        tracker.update(
+            IMAGE,
+            (detection(900 - step * 4, cid, confidence=0.3 if cid == 0 else 0.99),),
+            step * 0.01,
+        )
+    tracker.stop(1.1)
     assert len(tracker.results) == 1
-    assert tracker.results[0].status == "Unklar"
-    assert reason in tracker.results[0].reason
-    assert tracker.counts() == {"Unklar": 1, "Unvollständig": 0}
-    assert tracker.pose_counts() == {0: 0, 1: 0, 2: 0}
+    record = tracker.results[0]
+    assert record.observations == 100 and record.winning_observations == majority
+    assert record.consensus == majority / 100
+    assert record.mean_confidence == pytest.approx(0.3)
+    expected_counts = {0: majority, 1: 100 - majority} if majority < 100 else {0: 100}
+    assert record.pose_observations == expected_counts
+    assert record.status == ("Erkannt" if majority > 90 else "Unklar")
+    assert record.class_id == (0 if majority > 90 else None)
+    assert not record.pass_completed
+    assert tracker.pose_counts() == {0: int(majority > 90), 1: 0, 2: 0}
+
+
+def test_pose_decision_has_no_additional_observation_count_or_duration_gate():
+    tracker = ValidationTracker(ValidationSettings(), CLASSES)
+    tracker.update(IMAGE, (detection(900, 2),), 1)
+    tracker.stop(1.001)
+    assert tracker.results[0].status == "Erkannt"
+    assert tracker.results[0].class_id == 2
+    assert tracker.results[0].winning_observations == tracker.results[0].observations == 1
 
 
 class Camera(QObject):
@@ -312,7 +365,8 @@ def test_controller_warms_before_band_starts_and_stops_with_camera_failure(tmp_p
     control.on_frame(InferenceFrame(IMAGE, (detection(850),), 5, now + 0.2, IMAGE))
     camera.state_changed.emit(ConnectionState.ERROR)
     assert not control.running and band.stops == 1
-    assert control.tracker.results[0].status == "Unvollständig"
+    assert control.tracker.results[0].status == "Erkannt"
+    assert not control.tracker.results[0].pass_completed
     assert camera.capture[-1] == (False, None)
     control.close()
 
@@ -361,6 +415,11 @@ def test_store_export_is_consistent_and_contains_images_and_zero_classes(tmp_pat
     assert len(saved["speed_events"]) == 1
     assert "frame_age_ms" in saved["performance"]
     assert saved["performance"]["inference_ms"] == 5
+    assert saved["vote_policy"]["method"] == "detection_count"
+    assert saved["vote_policy"]["comparison"] == ">"
+    assert saved["vote_policy"]["threshold"] == 0.9
+    assert saved["results"][0]["winning_observations"] == saved["results"][0]["observations"]
+    assert saved["results"][0]["pass_completed"]
     assert (export / saved["results"][0]["image"]).is_file()
     assert (export / "bauteile.csv").read_bytes().startswith(b"\xef\xbb\xbf")
     with (export / "summen.csv").open(encoding="utf-8-sig", newline="") as stream:
@@ -393,11 +452,16 @@ def test_single_failed_entry_is_saved_and_exported(tmp_path, qtbot, clipped, fin
     control.store.flush()
     for directory in (control.store.directory, *list((tmp_path / "exports").iterdir())):
         saved = json.loads((directory / "session.json").read_text(encoding="utf-8"))
-        assert saved["status_counts"] == {"Unklar": 0, "Unvollständig": 1}
-        assert sum(saved["pose_counts"].values()) == 0
+        assert saved["status_counts"] == {"Unklar": 0, "Unvollständig": int(clipped)}
+        assert sum(saved["pose_counts"].values()) == int(not clipped)
         result = saved["results"][0]
-        assert result["status"] == "Unvollständig" and result["class_id"] is None
+        assert result["status"] == ("Unvollständig" if clipped else "Erkannt")
+        assert result["class_id"] == (None if clipped else 0)
+        assert result["candidate_class_id"] == (None if clipped else 0)
+        assert result["candidate_pose"] == (None if clipped else "Pose A")
         assert result["observations"] == (0 if clipped else 1)
+        assert result["first_class_id"] == 0 and result["first_confidence"] == 0.9
+        assert (directory / result["first_image"]).is_file()
         assert "nur eine Erkennung" in result["reason"]
         if clipped:
             assert result["image"] is None
@@ -406,11 +470,64 @@ def test_single_failed_entry_is_saved_and_exported(tmp_path, qtbot, clipped, fin
     export = next((tmp_path / "exports").iterdir())
     with (export / "bauteile.csv").open(encoding="utf-8-sig", newline="") as stream:
         rows = list(csv.DictReader(stream, delimiter=";"))
-    assert len(rows) == 1 and rows[0]["status"] == "Unvollständig"
+    assert len(rows) == 1 and rows[0]["status"] == ("Unvollständig" if clipped else "Erkannt")
+    assert json.loads(rows[0]["pose_observations"]) == ({} if clipped else {"0": 1})
+    assert int(rows[0]["winning_observations"]) == int(not clipped)
+    assert rows[0]["candidate_pose"] == ("" if clipped else "Pose A")
+    assert rows[0]["first_image"] == "erstbilder/000001.png"
+    assert rows[0]["first_class_id"] == "0"
+    assert float(rows[0]["first_confidence"]) == 0.9
     assert "nur eine Erkennung" in rows[0]["reason"]
     with (export / "summen.csv").open(encoding="utf-8-sig", newline="") as stream:
-        assert ["", "Unvollständig", "1"] in list(csv.reader(stream, delimiter=";"))
+        assert ["", "Unvollständig", str(int(clipped))] in list(csv.reader(stream, delimiter=";"))
     control.close()
+
+
+def test_first_image_is_saved_immediately_and_preserved_after_pose_changes(tmp_path, qtbot):
+    control, _, band, config = controller(tmp_path)
+    assert control.start(ValidationSettings(), tmp_path / "sessions", config)
+    now = time.time()
+    control.on_frame(InferenceFrame(IMAGE, (), 5, now, IMAGE))
+    band.status.continuous_running = True
+    band.status_changed.emit(band.status)
+    initial = np.empty_like(IMAGE)
+    initial[:] = (10, 20, 30)
+    try:
+        control.on_frame(
+            InferenceFrame(initial, (detection(990, confidence=0.3),), 5, now + 0.1, initial)
+        )
+        # The bounded writer must own a copy, including for a clipped, zero-vote entry.
+        initial[:] = 255
+        control.store.flush()
+        first_path = control.store.directory / "erstbilder/000001.png"
+        first_bytes = first_path.read_bytes()
+        assert cv2.imread(str(first_path))[390, 10].tolist() == [30, 20, 10]
+        assert control.tracker.tracks[1].observations == 0
+        assert not control.tracker.results
+        for step, x in enumerate((960, 920, 880), 2):
+            control.on_frame(
+                InferenceFrame(
+                    IMAGE, (detection(x, 1, confidence=0.99),), 5, now + step * 0.1, IMAGE
+                )
+            )
+        control.stop()
+        control.export(tmp_path / "exports")
+        control.store.flush()
+        record = control.tracker.results[0]
+        assert record.first_class_id == 0 and record.first_confidence == 0.3
+        assert record.candidate_class_id == 1
+        assert record.observations == 3
+        assert first_path.read_bytes() == first_bytes
+        assert (control.store.directory / record.image).is_file()
+        exported = next((tmp_path / "exports").iterdir())
+        assert (exported / record.first_image).read_bytes() == first_bytes
+        saved_part = json.loads(
+            (control.store.directory / "part_000001.json").read_text(encoding="utf-8")
+        )
+        assert saved_part["first_image"] == record.first_image
+        assert saved_part["first_confidence"] == 0.3
+    finally:
+        control.close()
 
 
 def test_store_queue_is_bounded(tmp_path):
@@ -464,7 +581,10 @@ def test_model_change_with_results_requires_reset_and_preserves_saved_session(tm
     assert saved["runs"][-1]["stop_reason"] == "Gestoppt"
 
 
-def test_validation_settings_persist_without_changing_existing_inference_settings(tmp_path):
+@pytest.mark.parametrize(("exit_fraction", "entry_fraction"), [(0.12, 0.4), (0.8, 0.9)])
+def test_validation_settings_persist_without_changing_existing_inference_settings(
+    tmp_path, exit_fraction, entry_fraction
+):
     from PyQt6.QtCore import QSettings
 
     from automated_image_capture.settings import SettingsStore
@@ -472,7 +592,76 @@ def test_validation_settings_persist_without_changing_existing_inference_setting
     backend = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     store = SettingsStore(backend)
     backend.setValue("inference/max_fps", 7)
-    config = ValidationSettings(speed_mm_s=20, exit_fraction=0.12, min_observations=8)
+    config = ValidationSettings(
+        speed_mm_s=20,
+        exit_fraction=exit_fraction,
+        entry_fraction=entry_fraction,
+        min_consensus=0.95,
+    )
     store.save_validation(config, tmp_path / "results")
     assert store.load_validation() == (config, tmp_path / "results")
     assert store.load_live_inference().max_fps == 7
+
+
+def test_legacy_vote_settings_migrate_to_count_share_and_ignore_old_gates(tmp_path):
+    from PyQt6.QtCore import QSettings
+
+    from automated_image_capture.settings import SettingsStore
+
+    backend = QSettings(str(tmp_path / "legacy.ini"), QSettings.Format.IniFormat)
+    backend.setValue("validation/min_consensus", 0.7)
+    backend.setValue("validation/min_observations", 1000)
+    backend.setValue("validation/min_duration_s", 60)
+    backend.setValue("validation/speed_mm_s", 35)
+    store = SettingsStore(backend)
+    config, directory = store.load_validation()
+    assert config.min_consensus == 0.9
+    assert config.speed_mm_s == 35
+    assert not hasattr(config, "min_observations") and not hasattr(config, "min_duration_s")
+    store.save_validation(replace(config, min_consensus=0.95), directory)
+    assert store.load_validation()[0].min_consensus == 0.95
+
+
+def test_lost_part_with_103_observations_is_counted_and_exported_as_its_majority_pose(
+    tmp_path, qtbot
+):
+    control, _, band, config = controller(tmp_path)
+    assert control.start(ValidationSettings(), tmp_path / "sessions", config)
+    now = time.time()
+    control.on_frame(InferenceFrame(IMAGE, (), 5, now, IMAGE))
+    band.status.continuous_running = True
+    band.status_changed.emit(band.status)
+    try:
+        for step in range(103):
+            cid = 2 if step < 102 else 1
+            control.on_frame(InferenceFrame(
+                IMAGE, (detection(900 - 3 * step, cid),), 5, now + 0.1 + step * 0.03, IMAGE
+            ))
+        control.on_frame(InferenceFrame(IMAGE, (), 5, now + 3.9, IMAGE))
+        assert len(control.tracker.results) == 1
+        result = control.tracker.results[0]
+        assert result.class_id == 2 and result.pose == "Pose C" and result.status == "Erkannt"
+        assert result.observations == 103 and result.winning_observations == 102
+        assert result.consensus == 102 / 103
+        assert result.pose_observations == {2: 102, 1: 1}
+        assert not result.pass_completed and "Erkennung verloren" in result.reason
+        assert control.tracker.pose_counts() == {0: 0, 1: 0, 2: 1}
+        # A sealed track cannot change its pose or count again after reappearing.
+        control.on_frame(InferenceFrame(IMAGE, (detection(510, 0),), 5, now + 4, IMAGE))
+        assert control.tracker.results == [result]
+        control.export(tmp_path / "exports")
+        control.store.flush()
+        export = next((tmp_path / "exports").iterdir())
+        saved = json.loads((export / "session.json").read_text(encoding="utf-8"))
+        assert saved["pose_counts"] == {"0": 0, "1": 0, "2": 1}
+        assert saved["status_counts"] == {"Unklar": 0, "Unvollständig": 0}
+        assert saved["results"][0]["pose_observations"] == {"2": 102, "1": 1}
+        assert (export / result.image).is_file() and (export / result.first_image).is_file()
+        with (export / "bauteile.csv").open(encoding="utf-8-sig", newline="") as stream:
+            row = next(csv.DictReader(stream, delimiter=";"))
+        assert row["pose"] == "Pose C" and row["status"] == "Erkannt"
+        assert row["observations"] == "103" and row["winning_observations"] == "102"
+        assert row["pass_completed"] == "False"
+        assert json.loads(row["pose_observations"]) == {"2": 102, "1": 1}
+    finally:
+        control.close()

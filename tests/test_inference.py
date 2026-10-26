@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
 import pytest
 from PyQt6.QtCore import QSettings, QTimer
@@ -16,6 +17,7 @@ from automated_image_capture.inference import (
     LiveInferenceWorker,
     draw_obb_overlay,
     extract_obb_detections,
+    suppress_duplicates,
 )
 from automated_image_capture.settings import SettingsStore
 
@@ -94,6 +96,68 @@ def test_live_worker_runs_model_in_background(qtbot, tmp_path: Path) -> None:
     assert frame.detections[0].class_name == "Pose 2"
     assert fake_model.sources[0][0, 0].tolist() == [33, 0, 11]
     assert worker.stop()
+
+
+def test_live_duplicate_filter_updates_detections_and_overlay_at_runtime(qtbot, tmp_path):
+    path = tmp_path / "model.pt"
+    path.touch()
+    image = np.zeros((80, 100, 3), np.uint8)
+    # Different pose classes on the same part, plus a separate second part.
+    result = SimpleNamespace(
+        names=FakeResult.names,
+        obb=SimpleNamespace(
+            xyxyxyxy=np.array([
+                [[10, 10], [30, 10], [30, 25], [10, 25]],
+                [[14, 10], [34, 10], [34, 25], [14, 25]],
+                [[60, 40], [80, 40], [80, 55], [60, 55]],
+            ]),
+            cls=np.array([0, 1, 1]),
+            conf=np.array([0.26, 0.85, 0.75]),
+        ),
+    )
+    model = FakeModel()
+    model.predict = lambda **_: [result]
+    worker = LiveInferenceWorker(
+        LiveInferenceConfig(path, max_fps=60), model_factory=lambda _: model
+    )
+    frames = QSignalSpy(worker.frame_ready)
+    raw = extract_obb_detections(result)
+    worker.start()
+    try:
+        for index, (enabled, threshold, expected) in enumerate([
+            (True, 0.6, (raw[1], raw[2])),
+            (False, 0.6, raw),
+            (True, 0.8, (raw[1], raw[2], raw[0])),
+        ], 1):
+            worker.update_runtime_settings(
+                0.25, 60, duplicate_filter=enabled, duplicate_iou=threshold
+            )
+            worker.submit(image, index)
+            qtbot.waitUntil(lambda count=index: len(frames) == count, timeout=3000)
+            frame = frames[index - 1][0]
+            assert frame.detections == expected
+            assert np.array_equal(frame.image, draw_obb_overlay(image, expected))
+            assert np.array_equal(frame.raw_image, image)
+    finally:
+        assert worker.stop()
+
+
+def test_duplicate_filter_uses_rotated_polygons_to_keep_separate_parts():
+    # Their axis-aligned bounds overlap strongly, but these thin rotated parts do not.
+    first = InferenceDetection(0, "Pose 0", 0.85, cv2.boxPoints(((50, 50), (80, 6), 45)))
+    second = InferenceDetection(1, "Pose 1", 0.75, cv2.boxPoints(((42, 58), (80, 6), 45)))
+    duplicate = InferenceDetection(2, "Pose 2", 0.26, first.corners)
+    kept = suppress_duplicates((duplicate, second, first))
+    assert len(kept) == 2
+    assert kept[0] is first and kept[1] is second
+
+
+@pytest.mark.parametrize("threshold", [0, -0.1, 1.1, float("nan")])
+def test_live_config_rejects_invalid_duplicate_overlap_threshold(threshold):
+    with pytest.raises(ValueError, match="Überlappungsschwelle"):
+        LiveInferenceConfig(Path("model.pt"), duplicate_iou=threshold).validated(
+            require_model=False
+        )
 
 
 def test_loaded_model_classes_are_available_without_any_detection(qtbot, tmp_path):
@@ -206,7 +270,8 @@ def test_fps_limit_is_independent_of_performance_clock_epoch(
         assert worker.stop()
 
 
-def test_live_settings_are_persisted(tmp_path: Path) -> None:
+@pytest.mark.parametrize("duplicate_filter", [False, True])
+def test_live_settings_are_persisted(tmp_path: Path, duplicate_filter) -> None:
     backend = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     store = SettingsStore(backend)
     config = LiveInferenceConfig(
@@ -215,10 +280,14 @@ def test_live_settings_are_persisted(tmp_path: Path) -> None:
         image_size=640,
         max_fps=7,
         device="0",
+        duplicate_filter=duplicate_filter,
+        duplicate_iou=0.75,
     )
 
     store.save_live_inference(config)
-    loaded = store.load_live_inference()
+    loaded = SettingsStore(
+        QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    ).load_live_inference()
 
     assert loaded == config
 
