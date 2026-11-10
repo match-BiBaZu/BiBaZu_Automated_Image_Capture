@@ -4,6 +4,10 @@
 - Feste Rutsche; kein Roboter erforderlich.
 - Optional: OBB-Labels erstellen, YOLO trainieren und Live-Erkennung nutzen.
 
+## Forschungshintergrund
+
+[You Only Look Once, But the Parts Keep Moving: YOLO-Based Workpiece Pose Classification for Aerodynamic Part Feeding](https://doi.org/10.1109/CASE58245.2025.11163971) (Shieff, Akchi und Raatz, 2025) untersucht die YOLO-basierte Lageklassifikation mit synthetischen Trainingsbildern aus Blender. Dieses Repository bietet eine verwandte Pipeline zur Aufnahme und Verarbeitung realer Kamerabilder.
+
 ## Voraussetzungen
 
 - Windows 10/11 x64 und [uv](https://docs.astral.sh/uv/).
