@@ -6,7 +6,9 @@
 
 ## Forschungshintergrund
 
-[You Only Look Once, But the Parts Keep Moving: YOLO-Based Workpiece Pose Classification for Aerodynamic Part Feeding](https://doi.org/10.1109/CASE58245.2025.11163971) (Shieff, Akchi und Raatz, 2025) untersucht die YOLO-basierte Lageklassifikation mit synthetischen Trainingsbildern aus Blender. Dieses Repository bietet eine verwandte Pipeline zur Aufnahme und Verarbeitung realer Kamerabilder.
+You Only Look Once, But the Parts Keep Moving: YOLO-Based Workpiece Pose Classification for Aerodynamic Part Feeding (Shieff, Akchi und Raatz, 2025) untersucht die YOLO-basierte Lageklassifikation mit synthetischen Trainingsbildern aus Blender. Dieses Repository bietet eine verwandte Pipeline zur Aufnahme und Verarbeitung realer Kamerabilder.
+
+[Veröffentlichung (DOI)](https://doi.org/10.1109/CASE58245.2025.11163971) · [PDF herunterladen](https://match-bibazu.github.io/assets/papers/yolo-workpiece-pose-classification-case-2025.pdf)
 
 ## Voraussetzungen
 
